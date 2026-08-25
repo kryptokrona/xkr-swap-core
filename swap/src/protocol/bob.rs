@@ -28,6 +28,10 @@ pub struct Swap {
     pub env_config: env::Config,
     pub id: Uuid,
     pub monero_receive_pool: MoneroAddressPool,
+    /// Bob's XKR receive address — the redeem sweep destination. Supplied per-run
+    /// (not persisted). TODO: thread this from the CLI/API request instead of the
+    /// `XKR_RECEIVE_ADDRESS` env fallback set in the constructors.
+    pub xkr_receive_address: String,
     pub event_emitter: Option<TauriHandle>,
 }
 
@@ -58,6 +62,7 @@ impl Swap {
             env_config,
             id,
             monero_receive_pool,
+            xkr_receive_address: std::env::var("XKR_RECEIVE_ADDRESS").unwrap_or_default(),
             event_emitter: None,
         }
     }
@@ -83,6 +88,7 @@ impl Swap {
             env_config,
             id,
             monero_receive_pool,
+            xkr_receive_address: std::env::var("XKR_RECEIVE_ADDRESS").unwrap_or_default(),
             event_emitter: None,
         })
     }

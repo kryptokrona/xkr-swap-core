@@ -166,21 +166,21 @@ pub enum BobState {
     BtcMercyPublished(State6),
     /// TxMercy has been confirmed. We received the burnt funds back.
     BtcMercyConfirmed(State6),
-    /// We have constructed and signed the Monero redeem transaction but have
-    /// not yet published it.
+    /// We have swept the shared XKR output to our receive address. Unlike Monero
+    /// (which builds an unpublished tx object), the XKR wallet `sweep` constructs,
+    /// signs and broadcasts atomically, so "constructed" already means broadcast;
+    /// we persist only the resulting tx hash. Kept as a distinct state so resume
+    /// after a crash can jump straight to confirming by hash without re-sweeping.
     XmrRedeemConstructed {
         state: State5,
-        /// The signed transaction blob to publish, serialized as wire-format hex.
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_redeem_tx: monero_oxide_wallet::transaction::Transaction,
+        /// The hash of the broadcast XKR sweep transaction.
+        xmr_redeem_txid: String,
     },
-    /// We have published the Monero redeem transaction but it has not yet been
-    /// included in a block.
+    /// The XKR redeem sweep has been broadcast but is not yet confirmed on-chain.
     XmrRedeemPublished {
         state: State5,
-        /// The signed transaction blob we published, serialized as wire-format hex.
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_redeem_tx: monero_oxide_wallet::transaction::Transaction,
+        /// The hash of the broadcast XKR sweep transaction.
+        xmr_redeem_txid: String,
     },
     XmrRedeemed {
         tx_lock_id: bitcoin::Txid,

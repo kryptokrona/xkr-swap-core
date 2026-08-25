@@ -124,4 +124,33 @@ impl XkrWalletClient {
             .map(str::to_string)
             .ok_or_else(|| anyhow!("sweep returned no txHash"))
     }
+
+    /// Poll until a transaction spending from the shared address (redeem/refund)
+    /// reaches `confirmations` depth. Keyed by `tx_hash`, so it is safe to re-call
+    /// after a restart without re-broadcasting. Returns the observed depth.
+    pub async fn confirm_tx(
+        &self,
+        spend_secret: &str,
+        view_secret: &str,
+        tx_hash: &str,
+        confirmations: Option<u64>,
+        timeout_ms: Option<u64>,
+    ) -> Result<u64> {
+        let mut params = json!({
+            "spendSecret": spend_secret,
+            "viewSecret": view_secret,
+            "txHash": tx_hash,
+        });
+        if let Some(confirmations) = confirmations {
+            params["confirmations"] = json!(confirmations);
+        }
+        if let Some(timeout_ms) = timeout_ms {
+            params["timeoutMs"] = json!(timeout_ms);
+        }
+        let result = self.call("confirmTx", params).await?;
+        result
+            .get("confirmations")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("confirmTx returned no confirmations"))
+    }
 }

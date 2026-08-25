@@ -57,13 +57,11 @@ pub enum Bob {
     BtcRedeemed(bob::State5),
     XmrRedeemConstructed {
         state: bob::State5,
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_redeem_tx: monero_oxide_wallet::transaction::Transaction,
+        xmr_redeem_txid: String,
     },
     XmrRedeemPublished {
         state: bob::State5,
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_redeem_tx: monero_oxide_wallet::transaction::Transaction,
+        xmr_redeem_txid: String,
     },
     WaitingForCancelTimelockExpiration {
         state: bob::State3,
@@ -161,17 +159,17 @@ impl From<BobState> for Bob {
             BobState::BtcRedeemed(state5) => Bob::BtcRedeemed(state5),
             BobState::XmrRedeemConstructed {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             } => Bob::XmrRedeemConstructed {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             },
             BobState::XmrRedeemPublished {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             } => Bob::XmrRedeemPublished {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             },
             BobState::WaitingForCancelTimelockExpiration {
                 state,
@@ -280,17 +278,17 @@ impl From<Bob> for BobState {
             Bob::BtcRedeemed(state5) => BobState::BtcRedeemed(state5),
             Bob::XmrRedeemConstructed {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             } => BobState::XmrRedeemConstructed {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             },
             Bob::XmrRedeemPublished {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             } => BobState::XmrRedeemPublished {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             },
             Bob::WaitingForCancelTimelockExpiration {
                 state,

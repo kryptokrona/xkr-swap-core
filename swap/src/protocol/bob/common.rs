@@ -10,6 +10,7 @@ use swap_machine::bob::{State3, State4, State5};
 use crate::cli::SwapEventLoopHandle;
 use crate::common::retry;
 use crate::monero;
+use crate::xkr::XkrWallet;
 use crate::monero::MoneroAddressPool;
 use monero_interface::PublishTransaction;
 use monero_oxide_wallet::transaction::{NotPruned, Transaction};
@@ -112,89 +113,71 @@ pub(super) async fn infallible_wait_for_monero_tx_confirmation(
 }
 
 pub(super) trait XmrRedeemable {
-    async fn construct_xmr_redeem_transaction(
+    /// Sweep the shared 2-of-2 XKR output to `xkr_receive_address`, returning the
+    /// broadcast tx hash. The XKR analogue of constructing+publishing the Monero
+    /// redeem: the wallet `sweep` builds, signs and broadcasts atomically, so there
+    /// is no separate publish step and no persisted transaction object.
+    async fn sweep_xmr_redeem(
         self,
-        monero_wallet: &monero::Wallets,
+        xkr: &XkrWallet,
         swap_id: Uuid,
-        monero_receive_pool: MoneroAddressPool,
-    ) -> Result<Transaction<NotPruned>>;
+        xkr_receive_address: &str,
+    ) -> Result<String>;
 }
 
 pub(super) trait InfallibleXmrRedeemable {
-    async fn infallible_construct_xmr_redeem_transaction(
+    async fn infallible_sweep_xmr_redeem(
         &self,
-        monero_wallet: &monero::Wallets,
+        xkr: &XkrWallet,
         swap_id: Uuid,
-        monero_receive_pool: MoneroAddressPool,
-    ) -> Transaction<NotPruned>;
+        xkr_receive_address: &str,
+    ) -> String;
 }
 
 impl XmrRedeemable for State5 {
-    async fn construct_xmr_redeem_transaction(
+    async fn sweep_xmr_redeem(
         self: State5,
-        monero_wallet: &monero::Wallets,
+        xkr: &XkrWallet,
         swap_id: Uuid,
-        monero_receive_pool: MoneroAddressPool,
-    ) -> Result<Transaction<NotPruned>> {
+        xkr_receive_address: &str,
+    ) -> Result<String> {
         let (spend_key, view_key) = self.xmr_keys();
+        // Canonical little-endian scalar bytes == the XKR private spend/view keys.
+        let spend_secret = spend_key.as_bytes();
+        let view_secret = view_key.0.as_bytes();
 
-        tracing::info!(%swap_id, "Constructing Monero redeem transaction");
+        tracing::info!(%swap_id, dest = %xkr_receive_address, "Sweeping shared XKR output to receive address");
 
-        let main_address = monero_wallet.main_wallet().await.main_address().await?;
-        let addresses = monero_receive_pool.fill_empty_addresses(main_address);
-        let ratios = monero_receive_pool.percentages();
-        let destinations: Vec<_> = addresses.into_iter().zip(ratios).collect();
-
-        tracing::debug!(
-            %swap_id,
-            destinations = ?destinations,
-            "Sweeping lock output across receive pool"
-        );
-
-        let inner_retry = backoff::ExponentialBackoffBuilder::new()
-            .with_max_elapsed_time(Some(std::time::Duration::from_secs(45)))
-            .build();
-
-        let tx = monero_wallet
-            .construct_sweep_to(
-                &self.lock_transfer_proof.tx_hash(),
-                spend_key,
-                view_key,
-                destinations,
-                Some(inner_retry),
-            )
+        // Idempotent in the service: a re-sweep after a crashed-but-broadcast attempt
+        // returns the existing tx hash instead of double-spending.
+        let txid = xkr
+            .redeem(spend_secret, view_secret, xkr_receive_address, None)
             .await
-            .context("Failed to construct Monero redeem transaction")?;
+            .context("Failed to sweep shared XKR redeem output")?;
 
-        tracing::info!(%swap_id, tx_hash = %monero::TxHash::from_tx(&tx), "Constructed Monero redeem transaction");
+        tracing::info!(%swap_id, %txid, "Broadcast XKR redeem sweep");
 
-        Ok(tx)
+        Ok(txid)
     }
 }
 
 impl InfallibleXmrRedeemable for State5 {
-    async fn infallible_construct_xmr_redeem_transaction(
+    async fn infallible_sweep_xmr_redeem(
         &self,
-        monero_wallet: &monero::Wallets,
+        xkr: &XkrWallet,
         swap_id: Uuid,
-        monero_receive_pool: MoneroAddressPool,
-    ) -> Transaction<NotPruned> {
+        xkr_receive_address: &str,
+    ) -> String {
         let state_for_retry = self.clone();
-        let monero_receive_pool_for_retry = monero_receive_pool;
 
         retry(
-            "Redeeming Monero",
+            "Sweeping XKR redeem",
             || {
                 let state = state_for_retry.clone();
-                let monero_receive_pool = monero_receive_pool_for_retry.clone();
 
                 async move {
                     state
-                        .construct_xmr_redeem_transaction(
-                            monero_wallet,
-                            swap_id,
-                            monero_receive_pool,
-                        )
+                        .sweep_xmr_redeem(xkr, swap_id, xkr_receive_address)
                         .await
                         .map_err(backoff::Error::transient)
                 }
@@ -203,7 +186,7 @@ impl InfallibleXmrRedeemable for State5 {
             None,
         )
         .await
-        .expect("we never stop retrying to redeem Monero")
+        .expect("we never stop retrying to sweep XKR redeem")
     }
 }
 

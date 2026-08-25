@@ -82,6 +82,29 @@ impl XkrWallet {
             .sweep(&Self::hex(spend_secret), &Self::hex(view_secret), dest, fee)
             .await
     }
+
+    /// Block until a redeem/refund sweep (a spend from the shared output) reaches
+    /// `confirmations` depth. Keyed by `tx_hash`, so a swap that crashed after
+    /// broadcasting can resume the confirm without re-sweeping. The XKR analogue
+    /// of waiting on `monero_wallet` for the redeem transaction to confirm.
+    /// Returns the observed confirmation depth.
+    pub async fn wait_until_confirmed(
+        &self,
+        spend_secret: [u8; 32],
+        view_secret: [u8; 32],
+        tx_hash: &str,
+        confirmations: u64,
+    ) -> Result<u64> {
+        self.client
+            .confirm_tx(
+                &Self::hex(spend_secret),
+                &Self::hex(view_secret),
+                tx_hash,
+                Some(confirmations),
+                None,
+            )
+            .await
+    }
 }
 
 #[cfg(test)]

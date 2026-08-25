@@ -6,6 +6,7 @@ use crate::monero;
 use crate::monero::MoneroAddressPool;
 use crate::network::cooperative_xmr_redeem_after_punish::Response::{Fullfilled, Rejected};
 use crate::network::swap_setup::bob::NewSwap;
+use crate::xkr::XkrWallet;
 use crate::protocol::bob::common::{
     InfallibleVerifyXmrLockTransaction, InfallibleXmrRedeemable, RecvTransferProof,
     WaitForBtcRedeem, WaitForIncomingXmrLockTransaction, WaitForXmrLockTransactionConfirmation,
@@ -90,6 +91,7 @@ pub async fn run_until(
             swap.bitcoin_wallet.clone(),
             swap.monero_wallet.clone(),
             swap.monero_receive_pool.clone(),
+            swap.xkr_receive_address.clone(),
             swap.event_emitter.clone(),
             swap.env_config,
         )
@@ -134,6 +136,9 @@ async fn next_state(
     bitcoin_wallet: Arc<dyn BitcoinWallet>,
     monero_wallet: Arc<monero::Wallets>,
     monero_receive_pool: MoneroAddressPool,
+    // Bob's XKR receive address — the sweep destination for the redeem. Supplied
+    // per-run by the caller (not persisted in state), mirroring the receive pool.
+    xkr_receive_address: String,
     event_emitter: Option<TauriHandle>,
     env_config: env::Config,
 ) -> Result<BobState> {
@@ -831,97 +836,69 @@ async fn next_state(
                 TauriSwapProgressEvent::ConstructingMoneroRedeem,
             );
 
-            let xmr_redeem_tx = state
-                .infallible_construct_xmr_redeem_transaction(
-                    &*monero_wallet,
-                    swap_id,
-                    monero_receive_pool.clone(),
-                )
+            let xkr = XkrWallet::from_env();
+            let xmr_redeem_txid = state
+                .infallible_sweep_xmr_redeem(&xkr, swap_id, &xkr_receive_address)
                 .await;
 
             BobState::XmrRedeemConstructed {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             }
         }
         BobState::XmrRedeemConstructed {
             state,
-            xmr_redeem_tx,
+            xmr_redeem_txid,
         } => {
-            let xmr_redeem_tx_hash = monero::TxHash::from_tx(&xmr_redeem_tx);
-
+            // The XKR sweep already broadcast atomically in the previous step; this
+            // state exists only so a crashed swap resumes straight into confirming.
             event_emitter.emit_swap_progress_event(
                 swap_id,
                 TauriSwapProgressEvent::PublishingMoneroRedeem {
-                    xmr_redeem_tx_hex: hex::encode(xmr_redeem_tx.serialize()),
+                    xmr_redeem_tx_hex: xmr_redeem_txid.clone(),
                 },
             );
 
-            retry(
-                "Publishing Monero redeem transaction",
-                || async {
-                    let is_present = monero_wallet
-                        .is_transaction_present(&xmr_redeem_tx_hash)
-                        .await
-                        .context("Failed to check whether Monero redeem transaction is already present on chain")
-                        .map_err(backoff::Error::transient)?;
-
-                    if is_present {
-                        tracing::info!(%swap_id, %xmr_redeem_tx_hash, "Monero redeem transaction is already present on chain, skipping publish");
-                        return Ok(());
-                    }
-
-                    monero_wallet
-                        .rpc_client()
-                        .await
-                        .map_err(backoff::Error::transient)?
-                        .publish_transaction(&xmr_redeem_tx)
-                        .await
-                        .context("Failed to publish Monero redeem transaction")
-                        .map_err(backoff::Error::transient)
-                },
-                None,
-                None,
-            )
-            .await
-            .context("Failed to publish Monero redeem transaction")?;
-
-            tracing::info!(%swap_id, %xmr_redeem_tx_hash, "Published Monero redeem transaction");
+            tracing::info!(%swap_id, txid = %xmr_redeem_txid, "XKR redeem sweep is broadcast");
 
             BobState::XmrRedeemPublished {
                 state,
-                xmr_redeem_tx,
+                xmr_redeem_txid,
             }
         }
         BobState::XmrRedeemPublished {
             state,
-            xmr_redeem_tx,
+            xmr_redeem_txid,
         } => {
-            let xmr_redeem_tx_hash = monero::TxHash::from_tx(&xmr_redeem_tx);
-
             event_emitter.emit_swap_progress_event(
                 swap_id,
                 TauriSwapProgressEvent::XmrRedeemPublished {
-                    xmr_redeem_txids: vec![xmr_redeem_tx_hash.clone()],
+                    xmr_redeem_txids: vec![monero::TxHash(xmr_redeem_txid.clone())],
                     xmr_receive_pool: monero_receive_pool.clone(),
-                    xmr_redeem_tx_hex: hex::encode(xmr_redeem_tx.serialize()),
+                    xmr_redeem_tx_hex: xmr_redeem_txid.clone(),
                 },
             );
 
-            infallible_wait_for_monero_tx_confirmation(
-                &monero_wallet,
-                swap_id,
-                "redeem",
-                &xmr_redeem_tx,
-                1,
-                XMR_REDEEM_REPUBLISH_INTERVAL,
-            )
-            .await;
+            // Best-effort confirm; the sweep is already broadcast, so Bob has the
+            // funds either way. Keyed by txid, so this is safe to re-run on resume.
+            let xkr = XkrWallet::from_env();
+            let (spend_key, view_key) = state.xmr_keys();
+            if let Err(e) = xkr
+                .wait_until_confirmed(
+                    spend_key.as_bytes(),
+                    view_key.0.as_bytes(),
+                    &xmr_redeem_txid,
+                    1,
+                )
+                .await
+            {
+                tracing::warn!(%swap_id, err = %e, "Failed to confirm XKR redeem sweep; proceeding as redeemed since it is already broadcast");
+            }
 
             event_emitter.emit_swap_progress_event(
                 swap_id,
                 TauriSwapProgressEvent::XmrRedeemed {
-                    xmr_redeem_txids: vec![xmr_redeem_tx_hash],
+                    xmr_redeem_txids: vec![monero::TxHash(xmr_redeem_txid.clone())],
                     xmr_receive_pool: monero_receive_pool.clone(),
                 },
             );
@@ -1403,16 +1380,13 @@ async fn next_state(
                         .await
                         .context("Failed to wait for Monero lock transaction to be confirmed")?;
 
+                    let xkr = XkrWallet::from_env();
                     match retry(
-                        "Constructing Monero redeem transaction",
+                        "Sweeping XKR redeem",
                         || async {
                             state5
                                 .clone()
-                                .construct_xmr_redeem_transaction(
-                                    &monero_wallet,
-                                    swap_id,
-                                    monero_receive_pool.clone(),
-                                )
+                                .sweep_xmr_redeem(&xkr, swap_id, &xkr_receive_address)
                                 .await
                                 .map_err(backoff::Error::transient)
                         },
@@ -1421,12 +1395,12 @@ async fn next_state(
                         None,
                     )
                     .await
-                    .context("Failed to construct Monero redeem transaction")
+                    .context("Failed to sweep XKR redeem")
                     {
-                        Ok(xmr_redeem_tx) => {
+                        Ok(xmr_redeem_txid) => {
                             return Ok(BobState::XmrRedeemConstructed {
                                 state: state5,
-                                xmr_redeem_tx,
+                                xmr_redeem_txid,
                             });
                         }
                         Err(error) => {

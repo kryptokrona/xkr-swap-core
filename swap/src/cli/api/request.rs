@@ -63,6 +63,10 @@ pub struct BuyXmrArgs {
     #[typeshare(serialized_as = "Option<string>")]
     pub bitcoin_change_address: Option<bitcoin::Address<NetworkUnchecked>>,
     pub monero_receive_pool: MoneroAddressPool,
+    /// The XKR address to receive the swapped funds at (the redeem sweep
+    /// destination). Supplied per-swap; not persisted, so a resumed swap falls
+    /// back to the `XKR_RECEIVE_ADDRESS` env var.
+    pub xkr_receive_address: String,
 }
 
 impl Request for BuyXmrArgs {
@@ -1043,6 +1047,7 @@ pub async fn buy_xmr(
     let BuyXmrArgs {
         bitcoin_change_address,
         monero_receive_pool,
+        xkr_receive_address,
     } = buy_xmr;
 
     let config = context.try_get_config().await?;
@@ -1200,6 +1205,7 @@ pub async fn buy_xmr(
                     env_config,
                     swap_event_loop_handle,
                     monero_receive_pool.clone(),
+                    xkr_receive_address.clone(),
                     bitcoin_change_address_for_spawn,
                     tx_lock_amount,
                     tx_lock_fee

@@ -71,6 +71,7 @@ safelog = { workspace = true }
 semver = { workspace = true }
 structopt = "0.3"
 swap-controller-api = { path = "../swap-controller-api" }
+xkr-wallet = { path = "../xkr-wallet" }
 swap-core = { path = "../swap-core" }
 swap-db = { path = "../swap-db" }
 swap-env = { path = "../swap-env" }

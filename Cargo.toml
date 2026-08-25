@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "bitcoin-wallet",
+  "xkr-wallet",
   "electrum-pool",
   "libp2p-rendezvous-node",
   "libp2p-tor",

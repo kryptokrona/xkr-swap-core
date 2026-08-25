@@ -65,8 +65,8 @@ async fn main() -> Result<()> {
             let view_secret = args.rest.get(1).ok_or_else(|| anyhow!("viewSecret required"))?;
             let amount: u64 = args.rest.get(2).ok_or_else(|| anyhow!("amount required"))?.parse()?;
             let timeout_ms = args.rest.get(3).and_then(|s| s.parse().ok());
-            client.watch_for_lock(address, view_secret, amount, timeout_ms).await?;
-            println!("detected");
+            let txid = client.watch_for_lock(address, view_secret, amount, timeout_ms).await?;
+            println!("detected {txid}");
         }
         Some("sweep") => {
             let spend_secret = args.rest.first().ok_or_else(|| anyhow!("spendSecret required"))?;

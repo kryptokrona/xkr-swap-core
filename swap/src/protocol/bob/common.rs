@@ -202,30 +202,40 @@ pub(super) trait WaitForIncomingXmrLockTransaction {
 impl WaitForIncomingXmrLockTransaction for State3 {
     async fn wait_for_incoming_xmr_lock_transaction(
         &self,
-        monero_wallet: &monero::Wallets,
+        _monero_wallet: &monero::Wallets,
         _swap_id: Uuid,
-        monero_wallet_restore_blockheight: monero::BlockHeight,
+        _monero_wallet_restore_blockheight: monero::BlockHeight,
     ) -> monero::TxHash {
         let (public_spend_key, private_view_key) = self.xmr_view_keys();
+        // Shared 2-of-2 output keys: watch the shared XKR address with the shared
+        // view secret until Alice's lock lands, then record its tx hash.
+        let spend_public = public_spend_key.as_bytes();
+        let view_public = private_view_key.public().0.as_bytes();
+        let view_secret = private_view_key.0.as_bytes();
+        let amount = self.xmr_amount().as_pico();
+        let xkr = XkrWallet::from_env();
 
         retry(
-            "Waiting for incoming XMR lock transaction",
-            || async move {
-                monero_wallet
-                    .wait_for_incoming_transfer(
-                        public_spend_key,
-                        private_view_key,
-                        self.xmr_amount(),
-                        monero_wallet_restore_blockheight,
-                    )
-                    .await
-                    .map_err(backoff::Error::transient)
+            "Waiting for incoming XKR lock transaction",
+            || {
+                let xkr = xkr.clone();
+                async move {
+                    let address = xkr
+                        .shared_address(spend_public, view_public)
+                        .await
+                        .map_err(backoff::Error::transient)?;
+                    let txid = xkr
+                        .watch_for_lock(&address, view_secret, amount, None)
+                        .await
+                        .map_err(backoff::Error::transient)?;
+                    Ok(monero::TxHash(txid))
+                }
             },
             None,
             None,
         )
         .await
-        .expect("we never stop retrying to wait for incoming XMR lock transaction")
+        .expect("we never stop retrying to wait for incoming XKR lock transaction")
     }
 }
 
@@ -250,31 +260,27 @@ pub(super) trait VerifyXmrLockTransaction {
 impl VerifyXmrLockTransaction for State3 {
     async fn verify_xmr_lock_transaction(
         &self,
-        monero_wallet: &monero::Wallets,
-        tx_hash: monero::TxHash,
+        _monero_wallet: &monero::Wallets,
+        _tx_hash: monero::TxHash,
     ) -> Result<XmrLockTransactionValidity> {
         let (public_spend_key, private_view_key) = self.xmr_view_keys();
-        let expected_amount = self.xmr_amount();
+        let spend_public = public_spend_key.as_bytes();
+        let view_public = private_view_key.public().0.as_bytes();
+        let view_secret = private_view_key.0.as_bytes();
+        let amount = self.xmr_amount().as_pico();
 
-        let is_valid = monero_wallet
-            .verify_transfer(
-                &tx_hash,
-                public_spend_key,
-                private_view_key,
-                expected_amount,
-            )
-            .await?;
+        let xkr = XkrWallet::from_env();
+        let address = xkr.shared_address(spend_public, view_public).await?;
 
-        if !is_valid {
-            return Ok(XmrLockTransactionValidity::Invalid);
-        }
+        // The lock is valid once the shared address has received at least the
+        // agreed amount. Hermes funding is dropped in the XKR port (single-dest),
+        // so there is never a hermes amount. A short watch returns immediately if
+        // the deposit is already present; otherwise it waits briefly for it.
+        xkr.watch_for_lock(&address, view_secret, amount, Some(60_000))
+            .await
+            .context("Failed to observe the XKR lock at the shared address")?;
 
-        let (hermes_spend_key, hermes_view_key) = self.hermes_view_keys();
-        let hermes_amount = monero_wallet
-            .largest_received_utxo(&tx_hash, hermes_spend_key, hermes_view_key)
-            .await?;
-
-        Ok(XmrLockTransactionValidity::Valid { hermes_amount })
+        Ok(XmrLockTransactionValidity::Valid { hermes_amount: None })
     }
 }
 

@@ -22,8 +22,7 @@ pub enum Alice {
     },
     XmrLockTransactionConstructed {
         monero_wallet_restore_blockheight: BlockHeight,
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_lock_tx: monero_oxide_wallet::transaction::Transaction,
+        xmr_lock_txid: String,
         transfer_proof: TransferProof,
         state3: alice::State3,
     },
@@ -98,13 +97,11 @@ pub enum Alice {
     },
     XmrRefundTxConstructed {
         state3: alice::State3,
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_refund_tx: monero_oxide_wallet::transaction::Transaction,
+        xmr_refund_txid: String,
     },
     XmrRefundTxPublished {
         state3: alice::State3,
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_refund_tx: monero_oxide_wallet::transaction::Transaction,
+        xmr_refund_txid: String,
     },
     BtcWithholdPublished {
         state3: alice::State3,
@@ -178,12 +175,12 @@ impl From<AliceState> for Alice {
             AliceState::BtcLocked { state3 } => Alice::BtcLocked { state3: *state3 },
             AliceState::XmrLockTransactionConstructed {
                 monero_wallet_restore_blockheight,
-                xmr_lock_tx,
+                xmr_lock_txid,
                 transfer_proof,
                 state3,
             } => Alice::XmrLockTransactionConstructed {
                 monero_wallet_restore_blockheight,
-                xmr_lock_tx,
+                xmr_lock_txid,
                 transfer_proof,
                 state3: *state3,
             },
@@ -277,17 +274,17 @@ impl From<AliceState> for Alice {
             },
             AliceState::XmrRefundTxConstructed {
                 state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             } => Alice::XmrRefundTxConstructed {
                 state3: *state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             },
             AliceState::XmrRefundTxPublished {
                 state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             } => Alice::XmrRefundTxPublished {
                 state3: *state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             },
             AliceState::BtcEarlyRefundable { state3 } => {
                 Alice::BtcEarlyRefundable { state3: *state3 }
@@ -364,12 +361,12 @@ impl From<Alice> for AliceState {
             },
             Alice::XmrLockTransactionConstructed {
                 monero_wallet_restore_blockheight,
-                xmr_lock_tx,
+                xmr_lock_txid,
                 transfer_proof,
                 state3,
             } => AliceState::XmrLockTransactionConstructed {
                 monero_wallet_restore_blockheight,
-                xmr_lock_tx,
+                xmr_lock_txid,
                 transfer_proof,
                 state3: Box::new(state3),
             },
@@ -492,17 +489,17 @@ impl From<Alice> for AliceState {
             },
             Alice::XmrRefundTxConstructed {
                 state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             } => AliceState::XmrRefundTxConstructed {
                 state3: Box::new(state3),
-                xmr_refund_tx,
+                xmr_refund_txid,
             },
             Alice::XmrRefundTxPublished {
                 state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             } => AliceState::XmrRefundTxPublished {
                 state3: Box::new(state3),
-                xmr_refund_tx,
+                xmr_refund_txid,
             },
             Alice::BtcWithholdPublished { state3 } => AliceState::BtcWithholdPublished {
                 state3: Box::new(state3),

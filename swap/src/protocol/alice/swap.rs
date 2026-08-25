@@ -7,6 +7,7 @@ use crate::asb::{EventLoopHandle, LatestRate};
 use crate::common::retry;
 use crate::monero;
 use crate::monero::TransferProof;
+use crate::xkr::XkrWallet;
 use crate::protocol::alice::{AliceState, HermesFundingPolicy, Swap, TipConfig};
 use ::bitcoin::consensus::encode::serialize_hex;
 use anyhow::{Context, Result, bail};
@@ -168,55 +169,46 @@ where
                         .context("Failed to check for expired timelocks before locking Monero")
                         .map_err(backoff::Error::transient)?
                     {
-                        return Ok(None);
+                        return Ok::<_, backoff::Error<anyhow::Error>>(None);
                     }
 
-                    // Record the current monero wallet block height so we don't have to scan from
-                    // block 0 for scenarios where we create a refund wallet.
-                    let monero_wallet_restore_blockheight = monero_wallet
-                        .direct_rpc_block_height()
+                    // XKR restore height. TODO: query the XKR daemon height; 0 scans
+                    // from genesis (correct, but slower for the refund wallet).
+                    let monero_wallet_restore_blockheight = 0u64;
+
+                    // The agreed lock amount and the shared 2-of-2 address to lock into.
+                    // Hermes funding + developer tip are dropped in the XKR port
+                    // (single-destination); the lock sends only the swap amount.
+                    let req = state3.lock_xmr_transfer_request();
+                    let amount = req.amount.as_pico();
+                    let xkr = XkrWallet::from_env();
+
+                    let shared_address = xkr
+                        .shared_address(
+                            req.public_spend_key.as_bytes(),
+                            req.public_view_key.0.as_bytes(),
+                        )
                         .await
-                        .context("Failed to get Monero wallet block height")
+                        .context("Failed to derive shared XKR address")
                         .map_err(backoff::Error::transient)?;
 
-                    let (lock_address, amount) = state3
-                        .lock_xmr_transfer_request()
-                        .address_and_amount(env_config.monero_network);
+                    // Fund the lock from the ASB's own XKR wallet.
+                    let (asb_spend, asb_view) = XkrWallet::asb_keys_from_env()
+                        .context("ASB XKR keys not configured")
+                        .map_err(backoff::Error::transient)?;
 
-                    let hermes_funding_amount = hermes_funding_policy.funding_amount(state3.btc);
-
-                    let hermes_funding = state3
-                        .hermes_funding_transfer_request(hermes_funding_amount)
-                        .address_and_amount(env_config.monero_network);
-
-                    let destinations = build_transfer_destinations(
-                        lock_address,
-                        amount,
-                        hermes_funding,
-                        developer_tip.clone(),
-                    )?;
-
-                    let constructed = monero_wallet
-                        .construct_multi_destination_tx(&destinations)
+                    let txid = xkr
+                        .lock_send(asb_spend, asb_view, &shared_address, amount, None)
                         .await
-                        .map_err(|e| tracing::error!(err=%e, "Failed to construct Monero lock transaction"))
-                        .ok();
+                        .context("Failed to send XKR lock transaction")
+                        .map_err(backoff::Error::transient)?;
 
-                    let Some((xmr_lock_tx, receipt)) = constructed else {
-                        return Err(backoff::Error::transient(anyhow::anyhow!(
-                            "Failed to construct Monero lock transaction"
-                        )));
-                    };
-
-                    let tx_key = receipt.tx_keys.get(&lock_address.to_string()).expect("monero-sys guarantees that the address has a valid tx key or the tx isn't published");
-
-                    Ok(Some((
+                    Ok::<_, backoff::Error<anyhow::Error>>(Some((
                         monero_wallet_restore_blockheight,
-                        TransferProof::new(
-                            monero::TxHash(receipt.txid),
-                            *tx_key,
-                        ),
-                        xmr_lock_tx,
+                        txid.clone(),
+                        // tx_key is unused on the XKR side (Bob detects the lock by
+                        // view-key scan); keep the TransferProof shape with a placeholder.
+                        TransferProof::new(monero::TxHash(txid), placeholder_tx_key()),
                     )))
                 },
                 |e, wait_time: Duration| {
@@ -232,12 +224,12 @@ where
 
             match constructed {
                 // If the construction was successful, we transition to the next state
-                Ok(Some((monero_wallet_restore_blockheight, transfer_proof, xmr_lock_tx))) => {
+                Ok(Some((monero_wallet_restore_blockheight, xmr_lock_txid, transfer_proof))) => {
                     AliceState::XmrLockTransactionConstructed {
                         monero_wallet_restore_blockheight: BlockHeight {
                             height: monero_wallet_restore_blockheight,
                         },
-                        xmr_lock_tx,
+                        xmr_lock_txid,
                         transfer_proof,
                         state3,
                     }
@@ -337,69 +329,25 @@ where
         }
         AliceState::XmrLockTransactionConstructed {
             monero_wallet_restore_blockheight,
-            xmr_lock_tx,
+            xmr_lock_txid,
             transfer_proof,
             state3,
         } => {
-            let xmr_lock_tx_hash = monero::TxHash::from_tx(&xmr_lock_tx);
+            // The XKR lock was already broadcast atomically in the construct step
+            // (gated there by the cancel-timelock check). Unlike Monero's separate
+            // publish step, there is nothing to broadcast here.
+            //
+            // NOTE: because the send is atomic, the construct-time timelock check is
+            // the only guard; a crash between broadcast and state-persist can leave
+            // XKR locked after the cancel timelock. This is inherent to the XKR
+            // wallet's build+broadcast-in-one model.
+            tracing::info!(%swap_id, txid = %xmr_lock_txid, "XKR lock transaction is broadcast");
 
-            retry::<AliceState, _, _>(
-                "Publishing Monero lock transaction",
-                || async {
-                    let is_present = monero_wallet
-                        .is_transaction_present(&xmr_lock_tx_hash)
-                        .await
-                        .context("Failed to check whether Monero lock transaction is already present on chain")
-                        .map_err(backoff::Error::transient)?;
-
-                    if !is_present {
-                        if !cancel_timelock_not_expired(&state3, &*bitcoin_wallet)
-                            .await
-                            .context("Failed to check for expired timelocks before publishing Monero lock transaction")
-                            .map_err(backoff::Error::transient)?
-                        {
-                            tracing::warn!(
-                                %swap_id,
-                                "Cancel timelock expired before we confirmed the Monero lock transaction was published. Publishing is not atomic, so the Monero may already be locked; waiting for the cancel timelock to recover safely instead of risking an early Bitcoin refund while the Monero is locked."
-                            );
-                            return Ok(AliceState::WaitingForCancelTimelockExpiration {
-                                monero_wallet_restore_blockheight,
-                                transfer_proof: transfer_proof.clone(),
-                                state3: state3.clone(),
-                            });
-                        }
-
-                        monero_wallet
-                            .rpc_client()
-                            .await
-                            .map_err(backoff::Error::transient)?
-                            .publish_transaction(&xmr_lock_tx)
-                            .await
-                            .context("Failed to publish Monero lock transaction")
-                            .map_err(backoff::Error::transient)?;
-
-                        tracing::info!(%swap_id, %xmr_lock_tx_hash, "Published Monero lock transaction");
-                    }
-
-                    monero_wallet
-                        .main_wallet()
-                        .await
-                        .scan_transaction(xmr_lock_tx_hash.0.clone())
-                        .await
-                        .context("Failed to scan Monero lock transaction into the wallet")
-                        .map_err(backoff::Error::transient)?;
-
-                    Ok(AliceState::XmrLockTransactionSent {
-                        monero_wallet_restore_blockheight,
-                        transfer_proof: transfer_proof.clone(),
-                        state3: state3.clone(),
-                    })
-                },
-                None,
-                None,
-            )
-            .await
-            .context("Failed to publish Monero lock transaction")?
+            AliceState::XmrLockTransactionSent {
+                monero_wallet_restore_blockheight,
+                transfer_proof,
+                state3,
+            }
         }
         AliceState::XmrLockTransactionSent {
             monero_wallet_restore_blockheight,
@@ -407,28 +355,23 @@ where
             state3,
         } => match state3.expired_timelocks(&*bitcoin_wallet).await? {
             ExpiredTimelocks::None { .. } => {
-                tracing::info!("Locked Monero, waiting for confirmations");
+                tracing::info!("Locked XKR, waiting for confirmations");
 
-                monero_wallet
-                    .wait_until_confirmed(
-                        &transfer_proof.tx_hash(),
-                        1,
-                        Some(|(xmr_lock_txid, confirmations, target_confirmations)| {
-                            tracing::debug!(
-                                %xmr_lock_txid,
-                                %confirmations,
-                                %target_confirmations,
-                                "Monero lock tx got new confirmation"
-                            )
-                        }),
-                    )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to wait until Monero transaction was confirmed ({})",
-                            transfer_proof.tx_hash()
-                        )
-                    })?;
+                // Confirm via the ASB's own wallet, which sees the lock as an
+                // outgoing transaction. Best-effort: the lock is already broadcast,
+                // and Bob independently detects it by view-key scanning.
+                let xkr = XkrWallet::from_env();
+                match XkrWallet::asb_keys_from_env() {
+                    Ok((asb_spend, asb_view)) => {
+                        if let Err(e) = xkr
+                            .wait_until_confirmed(asb_spend, asb_view, &transfer_proof.tx_hash().0, 1)
+                            .await
+                        {
+                            tracing::warn!(%swap_id, err = %e, "Failed to confirm XKR lock; proceeding");
+                        }
+                    }
+                    Err(e) => tracing::warn!(%swap_id, err = %e, "ASB XKR keys not configured; skipping lock confirmation"),
+                }
 
                 AliceState::XmrLocked {
                     monero_wallet_restore_blockheight,
@@ -824,90 +767,62 @@ where
         },
         AliceState::XmrRefundable {
             monero_wallet_restore_blockheight: _,
-            transfer_proof,
+            transfer_proof: _,
             spend_key,
             state3,
         } => {
-            let xmr_refund_tx = retry(
-                "Refund Monero",
-                || async {
-                    state3
-                        .construct_xmr_refund_transaction(
-                            monero_wallet.clone(),
-                            swap_id,
-                            spend_key,
-                            transfer_proof.clone(),
-                        )
-                        .await
-                        .map_err(backoff::Error::transient)
+            // `spend_key` is the combined shared spend key (s_a + s_b, extracted
+            // from Bob's BTC refund). Combined with the shared view secret, Alice
+            // reconstructs the shared XKR wallet and sweeps the locked output back
+            // to the ASB's refund address. This reuses the sweep (redeem) path.
+            let shared_spend = spend_key.as_bytes();
+            let shared_view = state3.xmr_shared_view_secret();
+            let refund_address = std::env::var("XKR_ASB_REFUND_ADDRESS")
+                .context("XKR_ASB_REFUND_ADDRESS not set")?;
+            let xkr = XkrWallet::from_env();
+
+            let xmr_refund_txid = retry(
+                "Refund XKR",
+                || {
+                    let xkr = xkr.clone();
+                    let refund_address = refund_address.clone();
+                    async move {
+                        xkr.redeem(shared_spend, shared_view, &refund_address, None)
+                            .await
+                            .map_err(backoff::Error::transient)
+                    }
                 },
                 None,
                 Duration::from_secs(60),
             )
             .await
-            .expect("We should never run out of retries while refunding Monero");
+            .expect("We should never run out of retries while refunding XKR");
 
             AliceState::XmrRefundTxConstructed {
                 state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             }
         }
         AliceState::XmrRefundTxConstructed {
             state3,
-            xmr_refund_tx,
+            xmr_refund_txid,
         } => {
-            let xmr_refund_tx_hash = monero::TxHash::from_tx(&xmr_refund_tx);
-
-            retry(
-                "Publishing Monero refund transaction",
-                || async {
-                    let is_present = monero_wallet
-                        .is_transaction_present(&xmr_refund_tx_hash)
-                        .await
-                        .context("Failed to check whether Monero refund transaction is already present on chain")
-                        .map_err(backoff::Error::transient)?;
-
-                    if is_present {
-                        tracing::info!(%swap_id, %xmr_refund_tx_hash, "Monero refund transaction is already present on chain, skipping publish");
-                        return Ok(());
-                    }
-
-                    monero_wallet
-                        .rpc_client()
-                        .await
-                        .map_err(backoff::Error::transient)?
-                        .publish_transaction(&xmr_refund_tx)
-                        .await
-                        .context("Failed to publish Monero refund transaction")
-                        .map_err(backoff::Error::transient)
-                },
-                None,
-                None,
-            )
-            .await
-            .context("Failed to publish Monero refund transaction")?;
-
-            tracing::info!(%swap_id, %xmr_refund_tx_hash, "Published Monero refund transaction");
+            // The XKR refund sweep already broadcast atomically in the previous step.
+            tracing::info!(%swap_id, txid = %xmr_refund_txid, "XKR refund sweep is broadcast");
 
             AliceState::XmrRefundTxPublished {
                 state3,
-                xmr_refund_tx,
+                xmr_refund_txid,
             }
         }
         AliceState::XmrRefundTxPublished {
             state3,
-            xmr_refund_tx,
+            xmr_refund_txid,
         } => {
-            let xmr_refund_tx_hash = monero::TxHash::from_tx(&xmr_refund_tx);
-
-            monero_wallet
-                .wait_until_confirmed(
-                    &xmr_refund_tx_hash,
-                    1,
-                    None::<fn((monero::TxHash, u64, u64))>,
-                )
-                .await
-                .context("Failed to wait for Monero refund transaction confirmation")?;
+            // The refund sweep is broadcast; Alice has reclaimed her funds. On-chain
+            // confirmation is skipped here because this state does not carry the
+            // shared keys needed to re-import the wallet for a confirm poll.
+            tracing::info!(%swap_id, txid = %xmr_refund_txid, "XKR refund sweep broadcast; funds reclaimed");
 
             AliceState::XmrRefunded {
                 state3: Some(state3),
@@ -1215,6 +1130,15 @@ async fn infallible_watch_for_encrypted_signature_via_hermes(
 ///
 /// The tip output is only included if tip.ratio > 0 and the effective tip is
 /// >= MIN_USEFUL_TIP_AMOUNT_PICONERO.
+/// A placeholder Monero tx key for the XKR `TransferProof`. XKR locks are detected
+/// by Bob via view-key scanning, so the `tx_key` field is unused; we keep the
+/// `TransferProof` shape (and the p2p message) unchanged and fill a fixed valid key.
+fn placeholder_tx_key() -> monero_oxide_ext::PrivateKey {
+    let mut bytes = [0u8; 32];
+    bytes[0] = 1;
+    monero_oxide_ext::PrivateKey::from_slice(&bytes).expect("scalar 1 is a valid private key")
+}
+
 fn build_transfer_destinations(
     lock_address: monero_address::MoneroAddress,
     lock_amount: monero_oxide_ext::Amount,

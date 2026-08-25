@@ -83,24 +83,28 @@ impl XkrWalletClient {
     }
 
     /// Block until the locked deposit lands at `address` (watched view-only).
+    /// Returns the hash of the detected lock deposit.
     pub async fn watch_for_lock(
         &self,
         address: &str,
         view_secret: &str,
         amount: u64,
         timeout_ms: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let mut params =
             json!({ "address": address, "viewSecret": view_secret, "amount": amount });
         if let Some(timeout_ms) = timeout_ms {
             params["timeoutMs"] = json!(timeout_ms);
         }
         let result = self.call("watchForLock", params).await?;
-        if result.get("detected").and_then(Value::as_bool) == Some(true) {
-            Ok(())
-        } else {
-            Err(anyhow!("watchForLock did not detect the deposit"))
+        if result.get("detected").and_then(Value::as_bool) != Some(true) {
+            return Err(anyhow!("watchForLock did not detect the deposit"));
         }
+        result
+            .get("txHash")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("watchForLock detected the deposit but returned no txHash"))
     }
 
     /// Reconstruct the shared wallet from the combined secrets and sweep to `dest`.
@@ -152,5 +156,32 @@ impl XkrWalletClient {
             .get("confirmations")
             .and_then(Value::as_u64)
             .ok_or_else(|| anyhow!("confirmTx returned no confirmations"))
+    }
+
+    /// Alice's side: send `amount` from the sender's own wallet to `dest` (the
+    /// shared address — the XKR lock). Returns the broadcast tx hash.
+    pub async fn lock_send(
+        &self,
+        sender_spend_secret: &str,
+        sender_view_secret: &str,
+        dest: &str,
+        amount: u64,
+        fee: Option<u64>,
+    ) -> Result<String> {
+        let mut params = json!({
+            "senderSpendSecret": sender_spend_secret,
+            "senderViewSecret": sender_view_secret,
+            "destAddress": dest,
+            "amount": amount,
+        });
+        if let Some(fee) = fee {
+            params["fee"] = json!(fee);
+        }
+        let result = self.call("lockSend", params).await?;
+        result
+            .get("txHash")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("lockSend returned no txHash"))
     }
 }

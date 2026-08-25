@@ -14,7 +14,7 @@
 //! key; likewise the shared view key. So the mapping is just: take the 32-byte
 //! scalar, hex-encode it, and hand it to the XKR wallet service.
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use xkr_wallet::XkrWalletClient;
 
 /// Default endpoint of the in-wallet XKR JSON-RPC service.
@@ -43,6 +43,33 @@ impl XkrWallet {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// Decode a 64-char lower/upper hex string into 32 bytes.
+    fn unhex(s: &str) -> Result<[u8; 32]> {
+        let s = s.trim();
+        if s.len() != 64 {
+            return Err(anyhow!("expected 64 hex chars, got {}", s.len()));
+        }
+        let mut out = [0u8; 32];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            out[i] = u8::from_str_radix(std::str::from_utf8(chunk)?, 16)
+                .context("invalid hex in key")?;
+        }
+        Ok(out)
+    }
+
+    /// The ASB's own XKR wallet keys `(spend, view)` used to fund locks, read from
+    /// `XKR_ASB_SPEND_SECRET` / `XKR_ASB_VIEW_SECRET` (64-char hex).
+    /// TODO: source these from ASB config instead of env.
+    pub fn asb_keys_from_env() -> Result<([u8; 32], [u8; 32])> {
+        let spend = Self::unhex(
+            &std::env::var("XKR_ASB_SPEND_SECRET").context("XKR_ASB_SPEND_SECRET not set")?,
+        )?;
+        let view = Self::unhex(
+            &std::env::var("XKR_ASB_VIEW_SECRET").context("XKR_ASB_VIEW_SECRET not set")?,
+        )?;
+        Ok((spend, view))
+    }
+
     /// Encode the shared 2-of-2 output keys (`B_A+B_B`, `V_A+V_B`) as a fundable
     /// XKR address — the address the XKR provider locks funds into.
     pub async fn shared_address(
@@ -56,13 +83,14 @@ impl XkrWallet {
     }
 
     /// Block until the counterparty's XKR lock lands at the shared address.
+    /// Returns the hash of the detected lock deposit.
     pub async fn watch_for_lock(
         &self,
         address: &str,
         view_secret: [u8; 32],
         amount: u64,
         timeout_ms: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.client
             .watch_for_lock(address, &Self::hex(view_secret), amount, timeout_ms)
             .await
@@ -80,6 +108,27 @@ impl XkrWallet {
     ) -> Result<String> {
         self.client
             .sweep(&Self::hex(spend_secret), &Self::hex(view_secret), dest, fee)
+            .await
+    }
+
+    /// Alice's side: send `amount` from the ASB's own wallet to the shared
+    /// `dest` address (the XKR lock). Returns the broadcast tx hash.
+    pub async fn lock_send(
+        &self,
+        sender_spend_secret: [u8; 32],
+        sender_view_secret: [u8; 32],
+        dest: &str,
+        amount: u64,
+        fee: Option<u64>,
+    ) -> Result<String> {
+        self.client
+            .lock_send(
+                &Self::hex(sender_spend_secret),
+                &Self::hex(sender_view_secret),
+                dest,
+                amount,
+                fee,
+            )
             .await
     }
 

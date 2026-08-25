@@ -2,11 +2,9 @@ use crate::common::retry;
 use crate::monero;
 use crate::protocol::Database;
 use crate::protocol::alice::AliceState;
-use crate::protocol::alice::swap::XmrRefundable;
 use anyhow::{Context, Result, bail};
 use bitcoin_wallet::BitcoinWallet;
 use libp2p::PeerId;
-use monero_interface::PublishTransaction;
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +28,9 @@ pub enum Error {
 pub async fn refund(
     swap_id: Uuid,
     bitcoin_wallet: Arc<dyn BitcoinWallet>,
-    monero_wallet: Arc<monero::Wallets>,
+    // Retained for signature compatibility; the XKR refund goes through the XKR
+    // wallet service, not the Monero wallet.
+    _monero_wallet: Arc<monero::Wallets>,
     db: Arc<dyn Database + Send + Sync>,
 ) -> Result<AliceState> {
     let state = db.get_state(swap_id).await?.try_into()?;
@@ -86,27 +86,27 @@ pub async fn refund(
         bail!(Error::RefundTransactionNotPublishedYet(bob_peer_id),);
     };
 
-    retry(
-        "Refund Monero",
-        || async {
-            let xmr_refund_tx = state3
-                .construct_xmr_refund_transaction(
-                    monero_wallet.clone(),
-                    swap_id,
-                    spend_key,
-                    transfer_proof.clone(),
-                )
-                .await
-                .map_err(backoff::Error::transient)?;
+    // `spend_key` is the combined shared spend key (s_a + s_b extracted from Bob's
+    // BTC refund). With the shared view secret, sweep the shared XKR output back to
+    // the ASB's refund address — the same operation as the in-flow XKR refund.
+    let _ = transfer_proof; // txid no longer needed: the wallet finds the output by scanning
+    let shared_spend = spend_key.as_bytes();
+    let shared_view = state3.xmr_shared_view_secret();
+    let refund_address = std::env::var("XKR_ASB_REFUND_ADDRESS")
+        .context("XKR_ASB_REFUND_ADDRESS not set")?;
+    let xkr = crate::xkr::XkrWallet::from_env();
 
-            monero_wallet
-                .rpc_client()
-                .await
-                .map_err(backoff::Error::transient)?
-                .publish_transaction(&xmr_refund_tx)
-                .await
-                .context("Failed to publish Monero refund transaction")
-                .map_err(backoff::Error::transient)
+    retry(
+        "Refund XKR",
+        || {
+            let xkr = xkr.clone();
+            let refund_address = refund_address.clone();
+            async move {
+                xkr.redeem(shared_spend, shared_view, &refund_address, None)
+                    .await
+                    .map(|_txid| ())
+                    .map_err(backoff::Error::transient)
+            }
         },
         None,
         Duration::from_secs(60),

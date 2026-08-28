@@ -166,7 +166,9 @@ async fn main() -> Result<()> {
     let env_config: Config = Regtest::get_config();
     let btc_network = env_config.bitcoin_network;
 
-    let electrum_url = env_or("ELECTRUM_RPC_URL", "tcp://@localhost:50001");
+    // electrum-client only strips the scheme, so no userinfo "@" in the URL:
+    // `tcp://host:port` (a leading "@" ends up in the host and breaks DNS).
+    let electrum_url = env_or("ELECTRUM_RPC_URL", "tcp://127.0.0.1:50001");
     let bitcoind_rpc = env("BITCOIND_RPC_URL")?;
     let btc_amount = Amount::from_sat(env_or("BTC_AMOUNT_SAT", "1000000").parse().context("BTC_AMOUNT_SAT")?);
     let bob_xkr_receive = env("XKR_RECEIVE_ADDRESS")?;

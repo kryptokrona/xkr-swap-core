@@ -64,6 +64,12 @@ fn env(key: &str) -> Result<String> {
     std::env::var(key).with_context(|| format!("missing env var {key}"))
 }
 
+/// Predicate for `bob::run_until` in punish mode: stop as soon as Bob has seen
+/// Alice's XKR lock (before he signs), simulating Bob going offline.
+fn bob_reached_xmr_locked(state: &bob::BobState) -> bool {
+    matches!(state, bob::BobState::XmrLocked(_))
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -174,13 +180,20 @@ async fn main() -> Result<()> {
     let bob_xkr_receive = env("XKR_RECEIVE_ADDRESS")?;
     let timeout_secs: u64 = env_or("SWAP_TIMEOUT_SECS", "900").parse().context("SWAP_TIMEOUT_SECS")?;
 
-    // SWAP_MODE=refund exercises the safety path: swap setup + Bob's BTC lock
-    // complete, but Alice never locks XKR, so once the cancel timelock expires Bob
-    // must unilaterally reclaim his BTC (ending in BtcRefunded). Default "happy"
-    // runs the full redeem-both-sides path.
-    let refund_mode = env_or("SWAP_MODE", "happy") == "refund";
-    if refund_mode {
-        println!("[l3] mode: REFUND (Alice will not lock XKR; Bob must reclaim BTC via the cancel timelock)");
+    // SWAP_MODE selects one of three scenarios:
+    //   happy  - full redeem-both-sides swap (Bob XmrRedeemed, Alice BtcRedeemed).
+    //   refund - Alice never locks XKR, so after the cancel timelock Bob reclaims
+    //            his BTC (Bob BtcRefunded).
+    //   punish - Alice locks XKR, but Bob goes offline after seeing the lock
+    //            (never signs, never refunds); after the cancel + punish timelocks
+    //            Alice claims Bob's BTC (Alice BtcPunished).
+    let swap_mode = env_or("SWAP_MODE", "happy");
+    let refund_mode = swap_mode == "refund";
+    let punish_mode = swap_mode == "punish";
+    match swap_mode.as_str() {
+        "refund" => println!("[l3] mode: REFUND (Alice won't lock XKR; Bob reclaims BTC via the cancel timelock)"),
+        "punish" => println!("[l3] mode: PUNISH (Bob goes offline after XKR lock; Alice claims his BTC via the punish timelock)"),
+        _ => println!("[l3] mode: HAPPY (full redeem-both-sides swap)"),
     }
 
     let scratch = std::env::temp_dir().join(format!("xkr-l3-{}", Uuid::new_v4()));
@@ -329,7 +342,13 @@ async fn main() -> Result<()> {
     );
 
     println!("[l3] starting swap {swap_id} for {btc_amount}");
-    let bob_join = tokio::spawn(bob::run(bob_swap));
+    // Punish path: Bob runs only until he has seen Alice's XKR lock, then stops
+    // (goes offline) without signing or refunding -- leaving Alice to punish.
+    let bob_join = if punish_mode {
+        tokio::spawn(bob::run_until(bob_swap, bob_reached_xmr_locked))
+    } else {
+        tokio::spawn(bob::run(bob_swap))
+    };
 
     // ---- Wait for both parties to finish, within the overall budget. ----
     let budget = Duration::from_secs(timeout_secs);
@@ -352,6 +371,28 @@ async fn main() -> Result<()> {
         }
         let _ = tokio::fs::remove_dir_all(&scratch).await;
         println!("[l3] REFUND SAFETY PATH PASSED (bob reclaimed his BTC)");
+        return Ok(());
+    }
+
+    if punish_mode {
+        // Bob stopped at XmrLocked and went offline (no signature, no refund).
+        // Alice can't redeem, so after the cancel + punish timelocks she claims
+        // his BTC. Bob finished early; now wait out Alice's punish path.
+        match bob_state {
+            bob::BobState::XmrLocked(_) => {}
+            other => bail!("bob was expected to stop at XmrLocked; got {other:?}"),
+        }
+        let alice_state = match timeout(budget, alice_join).await {
+            Ok(join) => join.context("alice task panicked")?.context("alice swap errored")?,
+            Err(_) => bail!("alice swap timed out after {timeout_secs}s"),
+        };
+        println!("[l3] alice terminal state: {alice_state:?}");
+        match alice_state {
+            alice::AliceState::BtcPunished { .. } => {}
+            other => bail!("alice did not reach BtcPunished; ended in {other:?}"),
+        }
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        println!("[l3] PUNISH SAFETY PATH PASSED (alice claimed the abandoned BTC)");
         return Ok(());
     }
 

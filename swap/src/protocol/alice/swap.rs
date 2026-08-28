@@ -173,7 +173,7 @@ where
                     // Hermes funding + developer tip are dropped in the XKR port
                     // (single-destination); the lock sends only the swap amount.
                     let req = state3.lock_xmr_transfer_request();
-                    let amount = req.amount.as_pico();
+                    let amount = crate::xkr::to_xkr_atomic(req.amount);
                     let xkr = XkrWallet::from_env();
 
                     let shared_address = xkr

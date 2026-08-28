@@ -20,6 +20,24 @@ use xkr_wallet::XkrWalletClient;
 /// Default endpoint of the in-wallet XKR JSON-RPC service.
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:40000";
 
+/// Convert an agreed swap amount into XKR atomic units.
+///
+/// The engine models the "other coin" amount internally as a Monero [`Amount`]
+/// (12 decimals — piconero). XKR (Kryptokrona) uses 5 decimals, so the value the
+/// XKR wallet RPC service expects is scaled down by the 7-decimal difference.
+/// Both parties call this on the same agreed `Amount`, and the truncation is
+/// deterministic, so Alice's lock and Bob's watch always agree on the integer.
+///
+/// The BTC<->XKR *rate* is a separate concern (the maker's price feed decides how
+/// many coins a given BTC amount buys); this only fixes the decimal scaling so a
+/// given coin amount maps to the right number of XKR atomic units.
+pub fn to_xkr_atomic(amount: crate::monero::Amount) -> u64 {
+    const MONERO_DECIMALS: u32 = 12;
+    const XKR_DECIMALS: u32 = 5;
+    const SCALE: u64 = 10u64.pow(MONERO_DECIMALS - XKR_DECIMALS); // 1e7
+    amount.as_pico() / SCALE
+}
+
 /// Adapter over the XKR wallet JSON-RPC service, speaking the engine's types.
 #[derive(Clone)]
 pub struct XkrWallet {
@@ -169,5 +187,17 @@ mod tests {
         let h = XkrWallet::hex(bytes);
         assert_eq!(h.len(), 64);
         assert_eq!(&h[..4], "0e0e");
+    }
+
+    #[test]
+    fn xkr_atomic_scaling_drops_seven_decimals() {
+        use crate::monero::Amount;
+        // 1 whole coin: 1e12 pico -> 1e5 XKR atomic.
+        assert_eq!(to_xkr_atomic(Amount::from_pico(1_000_000_000_000)), 100_000);
+        // 0.0025 coin (the CI swap amount for 2500 sat @ FixedRate 0.01).
+        assert_eq!(to_xkr_atomic(Amount::from_pico(2_500_000_000)), 250);
+        // Sub-atomic-XKR remainders truncate deterministically (so both parties agree).
+        assert_eq!(to_xkr_atomic(Amount::from_pico(9_999_999)), 0);
+        assert_eq!(to_xkr_atomic(Amount::from_pico(10_000_000)), 1);
     }
 }

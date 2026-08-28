@@ -104,7 +104,7 @@ impl WaitForIncomingXmrLockTransaction for State3 {
         let spend_public = public_spend_key.as_bytes();
         let view_public = private_view_key.public().0.as_bytes();
         let view_secret = private_view_key.0.as_bytes();
-        let amount = self.xmr_amount().as_pico();
+        let amount = crate::xkr::to_xkr_atomic(self.xmr_amount());
         let xkr = XkrWallet::from_env();
 
         retry(
@@ -154,7 +154,7 @@ impl VerifyXmrLockTransaction for State3 {
         let spend_public = public_spend_key.as_bytes();
         let view_public = private_view_key.public().0.as_bytes();
         let view_secret = private_view_key.0.as_bytes();
-        let amount = self.xmr_amount().as_pico();
+        let amount = crate::xkr::to_xkr_atomic(self.xmr_amount());
 
         let xkr = XkrWallet::from_env();
         let address = xkr.shared_address(spend_public, view_public).await?;
@@ -249,7 +249,7 @@ impl WaitForXmrLockTransactionConfirmation for State3 {
         let spend_public = public_spend_key.as_bytes();
         let view_public = private_view_key.public().0.as_bytes();
         let view_secret = private_view_key.0.as_bytes();
-        let amount = self.xmr_amount().as_pico();
+        let amount = crate::xkr::to_xkr_atomic(self.xmr_amount());
 
         retry(
             "Waiting for XKR lock transaction confirmation",
@@ -284,7 +284,7 @@ impl WaitForXmrLockTransactionConfirmation for State5 {
             monero_oxide_ext::PublicKey::from_private_key(&spend_secret).as_bytes();
         let view_public = private_view_key.public().0.as_bytes();
         let view_secret = private_view_key.0.as_bytes();
-        let amount = self.xmr_amount().as_pico();
+        let amount = crate::xkr::to_xkr_atomic(self.xmr_amount());
 
         retry(
             "Waiting for XKR lock transaction confirmation",

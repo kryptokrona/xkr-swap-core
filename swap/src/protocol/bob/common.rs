@@ -13,104 +13,6 @@ use crate::monero;
 use crate::xkr::XkrWallet;
 use crate::monero::MoneroAddressPool;
 use monero_interface::PublishTransaction;
-use monero_oxide_wallet::transaction::{NotPruned, Transaction};
-
-/// Wait until `tx` reaches `confirmation_target` confirmations, re-publishing it
-/// every `republish_interval` while we wait. The daemon may forget about the
-/// transaction before it is mined, so we rebroadcast it
-/// whenever it is no longer present on chain.
-async fn wait_for_monero_tx_confirmation(
-    monero_wallet: &monero::Wallets,
-    swap_id: Uuid,
-    kind: &str,
-    tx: &Transaction<NotPruned>,
-    confirmation_target: u64,
-    republish_interval: Duration,
-) -> Result<()> {
-    let tx_hash = monero::TxHash::from_tx(tx);
-
-    let republish = async {
-        loop {
-            tokio::time::sleep(republish_interval).await;
-
-            let _ = retry(
-                "Re-publishing Monero transaction",
-                || async {
-                    let is_present = monero_wallet
-                        .is_transaction_present(&tx_hash)
-                        .await
-                        .context(
-                            "Failed to check whether Monero transaction is still present on chain",
-                        )
-                        .map_err(backoff::Error::transient)?;
-
-                    if is_present {
-                        return Ok(());
-                    }
-
-                    tracing::warn!(%swap_id, %tx_hash, kind, "Monero transaction is no longer present on chain, re-publishing");
-
-                    monero_wallet
-                        .rpc_client()
-                        .await
-                        .map_err(backoff::Error::transient)?
-                        .publish_transaction(tx)
-                        .await
-                        .context("Failed to re-publish Monero transaction")
-                        .map_err(backoff::Error::transient)
-                },
-                None,
-                None,
-            )
-            .await;
-        }
-    };
-
-    tokio::select! {
-        result = monero_wallet.wait_until_confirmed(
-            &tx_hash,
-            confirmation_target,
-            None::<fn((monero::TxHash, u64, u64))>,
-        ) => {
-            result.context(format!("Failed to wait for Monero {kind} transaction confirmation"))?;
-        }
-        _ = republish => {}
-    }
-
-    Ok(())
-}
-
-/// Infallible variant of [`wait_for_monero_tx_confirmation`]: retries
-/// indefinitely so a closed confirmation subscription just re-subscribes instead
-/// of erroring.
-pub(super) async fn infallible_wait_for_monero_tx_confirmation(
-    monero_wallet: &monero::Wallets,
-    swap_id: Uuid,
-    kind: &str,
-    tx: &Transaction<NotPruned>,
-    confirmation_target: u64,
-    republish_interval: Duration,
-) {
-    retry(
-        "Waiting for Monero transaction confirmation",
-        || async {
-            wait_for_monero_tx_confirmation(
-                monero_wallet,
-                swap_id,
-                kind,
-                tx,
-                confirmation_target,
-                republish_interval,
-            )
-            .await
-            .map_err(backoff::Error::transient)
-        },
-        None,
-        None,
-    )
-    .await
-    .expect("we never stop retrying to wait for the Monero transaction confirmation")
-}
 
 pub(super) trait XmrRedeemable {
     /// Sweep the shared 2-of-2 XKR output to `xkr_receive_address`, returning the
@@ -191,21 +93,11 @@ impl InfallibleXmrRedeemable for State5 {
 }
 
 pub(super) trait WaitForIncomingXmrLockTransaction {
-    async fn wait_for_incoming_xmr_lock_transaction(
-        &self,
-        monero_wallet: &monero::Wallets,
-        swap_id: Uuid,
-        monero_wallet_restore_blockheight: monero::BlockHeight,
-    ) -> monero::TxHash;
+    async fn wait_for_incoming_xmr_lock_transaction(&self, swap_id: Uuid) -> monero::TxHash;
 }
 
 impl WaitForIncomingXmrLockTransaction for State3 {
-    async fn wait_for_incoming_xmr_lock_transaction(
-        &self,
-        _monero_wallet: &monero::Wallets,
-        _swap_id: Uuid,
-        _monero_wallet_restore_blockheight: monero::BlockHeight,
-    ) -> monero::TxHash {
+    async fn wait_for_incoming_xmr_lock_transaction(&self, _swap_id: Uuid) -> monero::TxHash {
         let (public_spend_key, private_view_key) = self.xmr_view_keys();
         // Shared 2-of-2 output keys: watch the shared XKR address with the shared
         // view secret until Alice's lock lands, then record its tx hash.
@@ -239,20 +131,16 @@ impl WaitForIncomingXmrLockTransaction for State3 {
     }
 }
 
-/// Outcome of validating a Monero lock transaction candidate.
+/// Outcome of validating an XKR lock transaction candidate.
 #[derive(Clone, Copy)]
 pub(super) enum XmrLockTransactionValidity {
     Invalid,
-    Valid {
-        /// What Alice attached to fund the Hermes transaction, if anything.
-        hermes_amount: Option<monero::Amount>,
-    },
+    Valid,
 }
 
 pub(super) trait VerifyXmrLockTransaction {
     async fn verify_xmr_lock_transaction(
         &self,
-        monero_wallet: &monero::Wallets,
         tx_hash: monero::TxHash,
     ) -> Result<XmrLockTransactionValidity>;
 }
@@ -260,7 +148,6 @@ pub(super) trait VerifyXmrLockTransaction {
 impl VerifyXmrLockTransaction for State3 {
     async fn verify_xmr_lock_transaction(
         &self,
-        _monero_wallet: &monero::Wallets,
         _tx_hash: monero::TxHash,
     ) -> Result<XmrLockTransactionValidity> {
         let (public_spend_key, private_view_key) = self.xmr_view_keys();
@@ -280,14 +167,13 @@ impl VerifyXmrLockTransaction for State3 {
             .await
             .context("Failed to observe the XKR lock at the shared address")?;
 
-        Ok(XmrLockTransactionValidity::Valid { hermes_amount: None })
+        Ok(XmrLockTransactionValidity::Valid)
     }
 }
 
 pub(super) trait InfallibleVerifyXmrLockTransaction {
     async fn infallible_verify_xmr_lock_transaction(
         self,
-        monero_wallet: Arc<monero::Wallets>,
         tx_hash: monero::TxHash,
     ) -> XmrLockTransactionValidity;
 }
@@ -298,21 +184,19 @@ where
 {
     async fn infallible_verify_xmr_lock_transaction(
         self,
-        monero_wallet: Arc<monero::Wallets>,
         tx_hash: monero::TxHash,
     ) -> XmrLockTransactionValidity {
         let state_for_retry = self;
 
         retry(
-            "Verifying Monero lock transaction",
+            "Verifying XKR lock transaction",
             || {
                 let state = state_for_retry.clone();
-                let monero_wallet = monero_wallet.clone();
                 let tx_hash = tx_hash.clone();
 
                 async move {
                     state
-                        .verify_xmr_lock_transaction(&*monero_wallet, tx_hash)
+                        .verify_xmr_lock_transaction(tx_hash)
                         .await
                         .map_err(backoff::Error::transient)
                 }
@@ -321,14 +205,29 @@ where
             None,
         )
         .await
-        .expect("we never stop retrying to verify Monero lock transaction")
+        .expect("we never stop retrying to verify XKR lock transaction")
     }
+}
+
+/// Observe the shared XKR lock at its address (view-only). NOTE: the XKR port
+/// treats "observed at the shared address with the agreed amount" as confirmed;
+/// it does not wait for a Monero-style deep-reorg confirmation window.
+async fn watch_shared_lock(
+    spend_public: [u8; 32],
+    view_public: [u8; 32],
+    view_secret: [u8; 32],
+    amount: u64,
+) -> Result<()> {
+    let xkr = XkrWallet::from_env();
+    let address = xkr.shared_address(spend_public, view_public).await?;
+    xkr.watch_for_lock(&address, view_secret, amount, None)
+        .await
+        .map(|_txid| ())
 }
 
 pub(super) trait WaitForXmrLockTransactionConfirmation {
     async fn infallible_wait_for_xmr_lock_confirmation(
         &self,
-        monero_wallet: &monero::Wallets,
         tx_hash: monero::TxHash,
         confirmation_target: u64,
         on_confirmation_update: Option<
@@ -340,62 +239,69 @@ pub(super) trait WaitForXmrLockTransactionConfirmation {
 impl WaitForXmrLockTransactionConfirmation for State3 {
     async fn infallible_wait_for_xmr_lock_confirmation(
         &self,
-        monero_wallet: &monero::Wallets,
         tx_hash: monero::TxHash,
         confirmation_target: u64,
         on_confirmation_update: Option<
             impl Fn((monero::TxHash, u64, u64)) + Send + Clone + 'static,
         >,
     ) -> Result<bool> {
-        retry(
-            "Waiting for XMR lock transaction confirmation",
-            || {
-                let tx_hash = tx_hash.clone();
-                let on_confirmation_update = on_confirmation_update.clone();
+        let (public_spend_key, private_view_key) = self.xmr_view_keys();
+        let spend_public = public_spend_key.as_bytes();
+        let view_public = private_view_key.public().0.as_bytes();
+        let view_secret = private_view_key.0.as_bytes();
+        let amount = self.xmr_amount().as_pico();
 
-                async move {
-                    monero_wallet
-                        .wait_until_confirmed(&tx_hash, confirmation_target, on_confirmation_update)
-                        .await
-                        .map(|_| true)
-                        .map_err(backoff::Error::transient)
-                }
+        retry(
+            "Waiting for XKR lock transaction confirmation",
+            || async move {
+                watch_shared_lock(spend_public, view_public, view_secret, amount)
+                    .await
+                    .map_err(backoff::Error::transient)
             },
             None,
             None,
         )
-        .await
+        .await?;
+
+        if let Some(cb) = on_confirmation_update {
+            cb((tx_hash, confirmation_target, confirmation_target));
+        }
+        Ok(true)
     }
 }
 
 impl WaitForXmrLockTransactionConfirmation for State5 {
     async fn infallible_wait_for_xmr_lock_confirmation(
         &self,
-        monero_wallet: &monero::Wallets,
         tx_hash: monero::TxHash,
         confirmation_target: u64,
         on_confirmation_update: Option<
             impl Fn((monero::TxHash, u64, u64)) + Send + Clone + 'static,
         >,
     ) -> Result<bool> {
-        retry(
-            "Waiting for XMR lock transaction confirmation",
-            || {
-                let tx_hash = tx_hash.clone();
-                let on_confirmation_update = on_confirmation_update.clone();
+        let (spend_secret, private_view_key) = self.xmr_keys();
+        let spend_public =
+            monero_oxide_ext::PublicKey::from_private_key(&spend_secret).as_bytes();
+        let view_public = private_view_key.public().0.as_bytes();
+        let view_secret = private_view_key.0.as_bytes();
+        let amount = self.xmr_amount().as_pico();
 
-                async move {
-                    monero_wallet
-                        .wait_until_confirmed(&tx_hash, confirmation_target, on_confirmation_update)
-                        .await
-                        .map(|_| true)
-                        .map_err(backoff::Error::transient)
-                }
+        retry(
+            "Waiting for XKR lock transaction confirmation",
+            || async move {
+                watch_shared_lock(spend_public, view_public, view_secret, amount)
+                    .await
+                    .map_err(backoff::Error::transient)
             },
             None,
             None,
         )
-        .await
+        .await?;
+
+        if let Some(cb) = on_confirmation_update {
+            cb((tx_hash, confirmation_target, confirmation_target));
+        }
+        Ok(true)
     }
 }
 

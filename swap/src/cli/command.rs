@@ -155,10 +155,10 @@ async fn apply_defaults(
             monero,
             tor,
         } => {
+            let _ = monero;
             ContextBuilder::new(is_testnet)
                 .with_tor(tor.enable_tor)
                 .with_bitcoin(bitcoin)
-                .with_monero(monero)
                 .with_data_dir(data)
                 .with_json(json)
                 .build(context.clone())

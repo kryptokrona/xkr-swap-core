@@ -7,11 +7,9 @@ members = [
   "libp2p-rendezvous-node",
   "libp2p-tor",
   "monero-oxide-ext",
-  "monero-rpc-pool",
-  "monero-sys",
-  "monero-tests",
-  "monero-wallet",
-  "monero-wallet-ng",
+  # XKR port: the monero-sys wrapper crates (monero-sys/monero-rpc-pool/
+  # monero-wallet/monero-wallet-ng/monero-tests) are no longer part of the
+  # workspace — the engine is XKR-only and needs no C++ Monero build.
   "src-tauri",
   "swap",
   "swap-asb",

@@ -31,18 +31,6 @@ impl Seed {
         Ok(Seed(bytes))
     }
 
-    /// Extract seed from a Monero wallet
-    pub async fn from_monero_wallet(wallet: &crate::monero::Wallet) -> Result<Self, Error> {
-        let mnemonic = wallet.seed().await.context("Failed to get wallet seed")?;
-
-        let monero_seed =
-            MoneroSeed::from_string(Language::English, Zeroizing::new(mnemonic.clone())).map_err(
-                |e| anyhow::anyhow!("Failed to parse seed from wallet (Error: {:?})", e),
-            )?;
-
-        Ok(Seed(*monero_seed.entropy()))
-    }
-
     pub fn derive_libp2p_identity(&self) -> identity::Keypair {
         let bytes = self.derive(b"NETWORK").derive(b"LIBP2P_IDENTITY").bytes();
 

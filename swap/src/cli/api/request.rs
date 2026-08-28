@@ -475,11 +475,8 @@ impl Request for GetRestoreHeightArgs {
     type Response = GetRestoreHeightResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-        let height = wallet.get_restore_height().await?;
-
-        Ok(GetRestoreHeightResponse { height })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -516,18 +513,15 @@ pub struct GetMoneroHistoryArgs;
 #[typeshare]
 #[derive(Serialize, Clone, Deserialize, Debug)]
 pub struct GetMoneroHistoryResponse {
-    pub transactions: Vec<monero_sys::TransactionInfo>,
+    pub transactions: Vec<String>, // XKR port: monero history unavailable
 }
 
 impl Request for GetMoneroHistoryArgs {
     type Response = GetMoneroHistoryResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        let transactions = wallet.history().await?;
-        Ok(GetMoneroHistoryResponse { transactions })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -547,10 +541,8 @@ impl Request for GetMoneroMainAddressArgs {
     type Response = GetMoneroMainAddressResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-        let address = wallet.main_address().await?;
-        Ok(GetMoneroMainAddressResponse { address })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -564,18 +556,15 @@ pub struct GetMoneroSubaddressesArgs {
 #[typeshare]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GetMoneroSubaddressesResponse {
-    pub subaddresses: Vec<monero_sys::SubaddressSummary>,
+    pub subaddresses: Vec<String>, // XKR port: monero subaddresses unavailable
 }
 
 impl Request for GetMoneroSubaddressesArgs {
     type Response = GetMoneroSubaddressesResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        let subaddresses = wallet.subaddress_summaries(self.account_index).await?;
-        Ok(GetMoneroSubaddressesResponse { subaddresses })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -591,28 +580,15 @@ pub struct CreateMoneroSubaddressArgs {
 #[typeshare]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateMoneroSubaddressResponse {
-    pub subaddress: monero_sys::SubaddressSummary,
+    pub subaddress: String, // XKR port: monero subaddresses unavailable
 }
 
 impl Request for CreateMoneroSubaddressArgs {
     type Response = CreateMoneroSubaddressResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        wallet
-            .create_subaddress(self.account_index, self.label.clone())
-            .await?;
-
-        // Fetch summaries and return the most recent one (highest address_index)
-        let summaries = wallet.subaddress_summaries(self.account_index).await?;
-        let subaddress = summaries
-            .into_iter()
-            .max_by_key(|s| s.address_index)
-            .ok_or_else(|| anyhow::anyhow!("No subaddresses found after creation"))?;
-
-        Ok(CreateMoneroSubaddressResponse { subaddress })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -637,14 +613,8 @@ impl Request for SetMoneroSubaddressLabelArgs {
     type Response = SetMoneroSubaddressLabelResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        wallet
-            .update_subaddress_label(self.account_index, self.address_index, self.label.clone())
-            .await?;
-
-        Ok(SetMoneroSubaddressLabelResponse { success: true })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -679,61 +649,8 @@ impl Request for SetRestoreHeightArgs {
     type Response = SetRestoreHeightResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        let height = match self {
-            SetRestoreHeightArgs::Height(height) => height as u64,
-            SetRestoreHeightArgs::Date(date) => {
-                let year: u16 = date.year;
-                let month: u8 = date.month;
-                let day: u8 = date.day;
-                // Validate ranges
-                if month < 1 || month > 12 {
-                    bail!("Month must be between 1 and 12");
-                }
-                if day < 1 || day > 31 {
-                    bail!("Day must be between 1 and 31");
-                }
-
-                tracing::info!(
-                    "Getting blockchain height for date: {}-{}-{}",
-                    year,
-                    month,
-                    day
-                );
-
-                let height = wallet
-                    .get_blockchain_height_by_date(year, month, day)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to get blockchain height for date {}-{}-{}",
-                            year, month, day
-                        )
-                    })?;
-                tracing::info!(
-                    "Blockchain height for date {}-{}-{}: {}",
-                    year,
-                    month,
-                    day,
-                    height
-                );
-
-                height
-            }
-        };
-
-        wallet.set_restore_height(height).await?;
-        wallet.pause_refresh().await?;
-        wallet.stop().await?;
-        tracing::debug!("Background refresh stopped");
-
-        wallet.rescan_blockchain_async().await?;
-        wallet.start_refresh().await?;
-        tracing::info!("Rescanning blockchain from height {} completed", height);
-
-        Ok(SetRestoreHeightResponse { success: true })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -753,13 +670,8 @@ impl Request for SetMoneroWalletPasswordArgs {
     type Response = SetMoneroWalletPasswordResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        wallet.set_password(self.password).await?;
-        wallet.store_in_current_file().await?;
-
-        Ok(SetMoneroWalletPasswordResponse { success: true })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -781,16 +693,8 @@ impl Request for GetMoneroBalanceArgs {
     type Response = GetMoneroBalanceResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        let total_balance = wallet.total_balance().await?;
-        let unlocked_balance = wallet.unlocked_balance().await?;
-
-        Ok(GetMoneroBalanceResponse {
-            total_balance: crate::monero::Amount::from_pico(total_balance.as_pico()),
-            unlocked_balance: crate::monero::Amount::from_pico(unlocked_balance.as_pico()),
-        })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -823,71 +727,8 @@ impl Request for SendMoneroArgs {
     type Response = SendMoneroResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        // Parse the address
-        let address = monero_address::MoneroAddress::from_str_with_unchecked_network(&self.address)
-            .map_err(|e| anyhow::anyhow!("Invalid Monero address: {}", e))?;
-
-        let tauri_handle = ctx
-            .tauri_handle
-            .clone()
-            .context("Tauri needs to be available to approve transactions")?;
-
-        // This is a closure that will be called by the monero-sys library to get approval for the transaction
-        // It sends an approval request to the frontend and returns true if the user approves the transaction
-        let approval_callback: Arc<
-            dyn Fn(
-                    String,
-                    monero_oxide_ext::Amount,
-                    monero_oxide_ext::Amount,
-                ) -> BoxFuture<'static, bool>
-                + Send
-                + Sync,
-        > = std::sync::Arc::new(
-            move |_txid: String,
-                  amount: monero_oxide_ext::Amount,
-                  fee: monero_oxide_ext::Amount| {
-                let tauri_handle = tauri_handle.clone();
-
-                Box::pin(async move {
-                    let details = SendMoneroDetails {
-                        address: address.to_string(),
-                        amount: amount.into(),
-                        fee: fee.into(),
-                    };
-
-                    tauri_handle
-                        .request_approval::<bool>(
-                            ApprovalRequestType::SendMonero(details),
-                            Some(60 * 5),
-                        )
-                        .await
-                        .unwrap_or(false)
-                })
-            },
-        );
-
-        let amount = match self.amount {
-            SendMoneroAmount::Sweep => None,
-            SendMoneroAmount::Specific(amount) => Some(amount.into()),
-        };
-
-        // This is the actual call to the monero-sys library to send the transaction
-        // monero-sys will call the approval callback after it has constructed and signed the transaction
-        // once the user approves, the transaction is published
-        let (receipt, amount_sent, fee) = wallet
-            .transfer_with_approval(&address, amount, approval_callback)
-            .await?
-            .context("Transaction was not approved by user")?;
-
-        Ok(SendMoneroResponse {
-            tx_hash: receipt.txid,
-            address: address.to_string(),
-            amount_sent: amount_sent.into(),
-            fee: fee.into(),
-        })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -1074,8 +915,6 @@ pub async fn buy_xmr(
         }
     };
 
-    let monero_wallet = context.try_get_monero_manager().await?;
-
     let env_config = config.env_config;
 
     // Prepare variables for the quote fetching process
@@ -1201,7 +1040,6 @@ pub async fn buy_xmr(
                     db.clone(),
                     swap_id,
                     bitcoin_wallet.clone(),
-                    monero_wallet,
                     env_config,
                     swap_event_loop_handle,
                     monero_receive_pool.clone(),
@@ -1249,7 +1087,6 @@ pub async fn resume_swap(
     let db = context.try_get_db().await?;
     let config = context.try_get_config().await?;
     let bitcoin_wallet = context.try_get_bitcoin_wallet().await?;
-    let monero_manager = context.try_get_monero_manager().await?;
 
     let seller_peer_id = db.get_peer_id(swap_id).await?;
     let seller_addresses = db.get_addresses(seller_peer_id).await?;
@@ -1273,7 +1110,6 @@ pub async fn resume_swap(
         db.clone(),
         swap_id,
         bitcoin_wallet,
-        monero_manager,
         config.env_config,
         swap_event_loop_handle,
         monero_receive_pool,
@@ -1871,19 +1707,8 @@ impl Request for GetMoneroSyncProgressArgs {
     type Response = GetMoneroSyncProgressResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        let sync_progress = wallet
-            .sync_progress()
-            .await
-            .context("Couldn't get sync progress")?;
-
-        Ok(GetMoneroSyncProgressResponse {
-            current_block: sync_progress.current_block,
-            target_block: sync_progress.target_block,
-            progress_percentage: sync_progress.percentage(),
-        })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -1901,12 +1726,8 @@ impl Request for GetMoneroSeedArgs {
     type Response = GetMoneroSeedResponse;
 
     async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
-        let wallet_manager = ctx.try_get_monero_manager().await?;
-        let wallet = wallet_manager.main_wallet().await;
-
-        let seed = wallet.seed().await?;
-
-        Ok(GetMoneroSeedResponse { seed })
+        let _ = ctx;
+        anyhow::bail!("Monero wallet operations are not available in the XKR build")
     }
 }
 
@@ -1942,8 +1763,8 @@ pub async fn change_monero_node(
     args: ChangeMoneroNodeArgs,
     context: Arc<Context>,
 ) -> Result<ChangeMoneroNodeResponse> {
-    context.change_monero_node(args.node_config).await?;
-
+    // XKR port: there is no Monero node to switch to.
+    let _ = (args, context);
     Ok(ChangeMoneroNodeResponse { success: true })
 }
 

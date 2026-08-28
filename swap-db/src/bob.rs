@@ -33,22 +33,17 @@ pub enum Bob {
         state: bob::State3,
         lock_transfer_proof: TransferProofMaybeWithTxKey,
         monero_wallet_restore_blockheight: BlockHeight,
-        #[serde(default)]
-        hermes_amount: Option<swap_core::monero::Amount>,
     },
     XmrLocked {
         state4: bob::State4,
     },
     EncSigReadyToBeSent {
         state4: bob::State4,
-        hermes: bob::HermesProgress,
         #[serde(default)]
         p2p_sent: bool,
     },
     EncSigSent {
         state4: bob::State4,
-        #[serde(default, with = "swap_serde::monero::transaction::option")]
-        hermes_tx: Option<monero_oxide_wallet::transaction::Transaction>,
     },
     BtcPunished {
         state: bob::State6,
@@ -135,27 +130,17 @@ impl From<BobState> for Bob {
                 state,
                 lock_transfer_proof,
                 monero_wallet_restore_blockheight,
-                hermes_amount,
             } => Bob::XmrLockTransactionSeen {
                 state,
                 lock_transfer_proof,
                 monero_wallet_restore_blockheight,
-                hermes_amount,
             },
             BobState::XmrLocked(state4) => Bob::XmrLocked { state4 },
-            BobState::EncSigReadyToBeSent {
-                state,
-                hermes,
-                p2p_sent,
-            } => Bob::EncSigReadyToBeSent {
+            BobState::EncSigReadyToBeSent { state, p2p_sent } => Bob::EncSigReadyToBeSent {
                 state4: state,
-                hermes,
                 p2p_sent,
             },
-            BobState::EncSigSent { state, hermes_tx } => Bob::EncSigSent {
-                state4: state,
-                hermes_tx,
-            },
+            BobState::EncSigSent { state } => Bob::EncSigSent { state4: state },
             BobState::BtcRedeemed(state5) => Bob::BtcRedeemed(state5),
             BobState::XmrRedeemConstructed {
                 state,
@@ -254,27 +239,17 @@ impl From<Bob> for BobState {
                 state,
                 lock_transfer_proof,
                 monero_wallet_restore_blockheight,
-                hermes_amount,
             } => BobState::XmrLockTransactionSeen {
                 state,
                 lock_transfer_proof,
                 monero_wallet_restore_blockheight,
-                hermes_amount,
             },
             Bob::XmrLocked { state4 } => BobState::XmrLocked(state4),
-            Bob::EncSigReadyToBeSent {
-                state4,
-                hermes,
-                p2p_sent,
-            } => BobState::EncSigReadyToBeSent {
+            Bob::EncSigReadyToBeSent { state4, p2p_sent } => BobState::EncSigReadyToBeSent {
                 state: state4,
-                hermes,
                 p2p_sent,
             },
-            Bob::EncSigSent { state4, hermes_tx } => BobState::EncSigSent {
-                state: state4,
-                hermes_tx,
-            },
+            Bob::EncSigSent { state4 } => BobState::EncSigSent { state: state4 },
             Bob::BtcRedeemed(state5) => BobState::BtcRedeemed(state5),
             Bob::XmrRedeemConstructed {
                 state,

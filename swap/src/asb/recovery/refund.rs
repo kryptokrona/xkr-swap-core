@@ -28,9 +28,6 @@ pub enum Error {
 pub async fn refund(
     swap_id: Uuid,
     bitcoin_wallet: Arc<dyn BitcoinWallet>,
-    // Retained for signature compatibility; the XKR refund goes through the XKR
-    // wallet service, not the Monero wallet.
-    _monero_wallet: Arc<monero::Wallets>,
     db: Arc<dyn Database + Send + Sync>,
 ) -> Result<AliceState> {
     let state = db.get_state(swap_id).await?.try_into()?;

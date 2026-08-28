@@ -174,6 +174,15 @@ async fn main() -> Result<()> {
     let bob_xkr_receive = env("XKR_RECEIVE_ADDRESS")?;
     let timeout_secs: u64 = env_or("SWAP_TIMEOUT_SECS", "900").parse().context("SWAP_TIMEOUT_SECS")?;
 
+    // SWAP_MODE=refund exercises the safety path: swap setup + Bob's BTC lock
+    // complete, but Alice never locks XKR, so once the cancel timelock expires Bob
+    // must unilaterally reclaim his BTC (ending in BtcRefunded). Default "happy"
+    // runs the full redeem-both-sides path.
+    let refund_mode = env_or("SWAP_MODE", "happy") == "refund";
+    if refund_mode {
+        println!("[l3] mode: REFUND (Alice will not lock XKR; Bob must reclaim BTC via the cancel timelock)");
+    }
+
     let scratch = std::env::temp_dir().join(format!("xkr-l3-{}", Uuid::new_v4()));
 
     println!("[l3] building bitcoin wallets (electrs {electrum_url}, network {btc_network:?})");
@@ -254,12 +263,20 @@ async fn main() -> Result<()> {
     println!("[l3] alice listening on {alice_addr}/p2p/{alice_peer_id}");
     tokio::spawn(alice_event_loop.run());
 
-    // Alice creates a Swap when Bob initiates setup; run it to completion.
+    // Alice creates a Swap when Bob initiates setup (via the event loop above).
+    // Happy path: run it to completion (locks XKR, redeems BTC). Refund path:
+    // receive it but never run it, so Alice completes setup — letting Bob lock
+    // BTC — yet never locks XKR, forcing Bob down the cancel-timelock refund path.
     let alice_join = tokio::spawn(async move {
         let swap = alice_swap_rx
             .recv()
             .await
             .context("alice never received a swap from bob")?;
+        if refund_mode {
+            tracing::info!("refund mode: Alice received the swap but will NOT lock XKR");
+            std::future::pending::<()>().await; // hold the swap; never lock
+            unreachable!()
+        }
         alice::run(swap, FixedRate::default()).await
     });
 
@@ -322,6 +339,21 @@ async fn main() -> Result<()> {
         Err(_) => bail!("bob swap timed out after {timeout_secs}s"),
     };
     println!("[l3] bob terminal state: {bob_state:?}");
+
+    if refund_mode {
+        // Alice is intentionally idle; stop her task, then assert Bob reclaimed
+        // his BTC. Any of the refund terminals counts as a safe recovery.
+        alice_join.abort();
+        match bob_state {
+            bob::BobState::BtcRefunded(_)
+            | bob::BobState::BtcEarlyRefunded(_)
+            | bob::BobState::BtcPartiallyRefunded(_) => {}
+            other => bail!("bob did not reach a refund terminal; ended in {other:?}"),
+        }
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        println!("[l3] REFUND SAFETY PATH PASSED (bob reclaimed his BTC)");
+        return Ok(());
+    }
 
     let alice_state = match timeout(budget, alice_join).await {
         Ok(join) => join.context("alice task panicked")?.context("alice swap errored")?,

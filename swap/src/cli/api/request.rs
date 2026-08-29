@@ -1077,6 +1077,140 @@ pub async fn buy_xmr(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// BuyXmrDirect: a headless swap against an explicitly-provided maker. Unlike
+// `buy_xmr`, this skips the interactive maker-selection/approval flow (which is
+// Tauri-event driven), so it can be driven over JSON-RPC by the GUI serve
+// daemon, which knows the maker (a local ASB) up front.
+// ---------------------------------------------------------------------------
+
+/// A valid mainnet Monero address, used only to satisfy the vestigial
+/// `monero_receive_pool` argument -- the XKR port routes payout to
+/// `xkr_receive_address`, so the pool is never used on the happy path.
+const DUMMY_XMR_ADDRESS: &str = "4B33mFPMq6mKi7Eiyd5XuyKRVMGVZz1Rqb9ZTyGApXW5d1aT7UBDZ89ewmnWFkzJ5wPd2SFbn313vCT8a4E2Qf4KQH4pNey";
+
+#[derive(Debug)]
+pub struct BuyXmrDirectArgs {
+    /// The maker's libp2p multiaddress (e.g. the local ASB).
+    pub seller_multiaddr: Multiaddr,
+    /// The maker's libp2p peer id.
+    pub seller_peer_id: PeerId,
+    /// The amount of BTC to lock (the swap amount).
+    pub btc_amount: bitcoin::Amount,
+    /// The XKR address to receive the swapped funds at.
+    pub xkr_receive_address: String,
+    /// Optional BTC change address; defaults to an internal wallet address.
+    pub bitcoin_change_address: Option<bitcoin::Address<NetworkUnchecked>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BuyXmrDirectResponse {
+    pub swap_id: Uuid,
+}
+
+impl Request for BuyXmrDirectArgs {
+    type Response = BuyXmrDirectResponse;
+
+    async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
+        let swap_id = Uuid::new_v4();
+        let swap_span = get_swap_tracing_span(swap_id);
+        buy_xmr_direct(self, swap_id, ctx).instrument(swap_span).await
+    }
+}
+
+/// Runs a swap against an explicitly-provided maker. Spawns the swap in the
+/// background and returns immediately with the swap id; progress is observed via
+/// `get_swap_infos_all` / `get_swap_info`.
+pub async fn buy_xmr_direct(
+    args: BuyXmrDirectArgs,
+    swap_id: Uuid,
+    context: Arc<Context>,
+) -> Result<BuyXmrDirectResponse> {
+    let BuyXmrDirectArgs {
+        seller_multiaddr,
+        seller_peer_id,
+        btc_amount,
+        xkr_receive_address,
+        bitcoin_change_address,
+    } = args;
+
+    let config = context.try_get_config().await?;
+    let db = context.try_get_db().await?;
+    let bitcoin_wallet = context.try_get_bitcoin_wallet().await?;
+    let mut event_loop_handle = context.try_get_event_loop_handle().await?;
+    let env_config = config.env_config;
+
+    let bitcoin_change_address = match bitcoin_change_address {
+        Some(addr) => addr
+            .require_network(bitcoin_wallet.network())
+            .context("Change address is not on the correct network")?,
+        None => bitcoin_wallet.new_address().await?,
+    };
+
+    let tx_lock_amount = btc_amount;
+    let tx_lock_fee = bitcoin_wallet
+        .estimate_fee(swap_core::bitcoin::TxLock::weight(), Some(tx_lock_amount))
+        .await?;
+
+    let monero_receive_pool: MoneroAddressPool =
+        swap_serde::monero::address::parse(DUMMY_XMR_ADDRESS)
+            .context("failed to parse placeholder monero address")?
+            .into();
+
+    db.insert_peer_id(swap_id, seller_peer_id).await?;
+    db.insert_address(seller_peer_id, seller_multiaddr.clone())
+        .await?;
+    db.insert_monero_address_pool(swap_id, monero_receive_pool.clone())
+        .await?;
+    event_loop_handle
+        .queue_peer_address(seller_peer_id, seller_multiaddr)
+        .await?;
+
+    context.swap_lock.acquire_swap_lock(swap_id).await?;
+
+    let swap_lock_ctx = context.clone();
+    context
+        .tasks
+        .clone()
+        .spawn(async move {
+            let run = async {
+                let swap_handle = event_loop_handle
+                    .swap_handle(seller_peer_id, swap_id)
+                    .await?;
+                let swap = Swap::new(
+                    db.clone(),
+                    swap_id,
+                    bitcoin_wallet.clone(),
+                    env_config,
+                    swap_handle,
+                    monero_receive_pool.clone(),
+                    xkr_receive_address,
+                    bitcoin_change_address,
+                    tx_lock_amount,
+                    tx_lock_fee,
+                );
+                bob::run(swap).await
+            }
+            .await;
+
+            match run {
+                Ok(state) => tracing::info!(%swap_id, state = %state, "Direct swap completed"),
+                Err(error) => tracing::error!(%swap_id, "Direct swap failed: {:#}", error),
+            }
+
+            swap_lock_ctx
+                .swap_lock
+                .release_swap_lock()
+                .await
+                .expect("Could not release swap lock");
+
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+
+    Ok(BuyXmrDirectResponse { swap_id })
+}
+
 #[tracing::instrument(fields(method = "resume_swap"), skip(context))]
 pub async fn resume_swap(
     resume: ResumeSwapArgs,

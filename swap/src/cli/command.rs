@@ -133,6 +133,16 @@ async fn apply_defaults(
             .request(context)
             .await?;
         }
+        CliCommand::Serve { bitcoin, rpc_port } => {
+            ContextBuilder::new(is_testnet)
+                .with_bitcoin(bitcoin)
+                .with_data_dir(data)
+                .with_json(json)
+                .build(context.clone())
+                .await?;
+
+            crate::cli::serve::run(context, "127.0.0.1".to_string(), rpc_port).await?;
+        }
         CliCommand::WithdrawBtc {
             bitcoin,
             amount,
@@ -284,6 +294,18 @@ enum CliCommand {
     Balance {
         #[structopt(flatten)]
         bitcoin: Bitcoin,
+    },
+    #[structopt(about = "Run the JSON-RPC serve daemon that the wallet GUI drives.")]
+    Serve {
+        #[structopt(flatten)]
+        bitcoin: Bitcoin,
+
+        #[structopt(
+            long = "rpc-port",
+            default_value = "40010",
+            help = "TCP port for the taker JSON-RPC serve daemon (localhost)."
+        )]
+        rpc_port: u16,
     },
     /// Resume a swap
     Resume {

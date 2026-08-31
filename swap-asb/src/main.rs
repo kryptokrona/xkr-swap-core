@@ -219,15 +219,28 @@ pub async fn main() -> Result<()> {
 
             let price_validity_duration =
                 std::time::Duration::from_secs(config.maker.price_ticker_validity_duration_secs);
-            let kraken_rate = ExchangeRate::new(
-                config.maker.ask_spread,
-                kraken_price_updates,
-                bitfinex_price_updates,
-                kucoin_price_updates,
-                exolix_price_updates,
-                price_validity_duration,
-            )
-            .context("Invalid price feed configuration")?;
+            // XKR has no BTC exchange pair to feed from, so the maker sets a fixed
+            // sats-per-XKR ask via `XKR_ASB_PRICE_SATS` (1 XKR ~ a few sats, so an
+            // integer is fine). Falls back to the exchange feeds when unset.
+            let kraken_rate = match std::env::var("XKR_ASB_PRICE_SATS")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .filter(|sats| *sats > 0)
+            {
+                Some(sats) => {
+                    tracing::info!(price_sats = sats, "Using fixed XKR maker price (sats per XKR)");
+                    ExchangeRate::fixed(bitcoin::Amount::from_sat(sats), config.maker.ask_spread)
+                }
+                None => ExchangeRate::new(
+                    config.maker.ask_spread,
+                    kraken_price_updates,
+                    bitfinex_price_updates,
+                    kucoin_price_updates,
+                    exolix_price_updates,
+                    price_validity_duration,
+                )
+                .context("Invalid price feed configuration")?,
+            };
             let namespace = XmrBtcNamespace::from_is_testnet(testnet);
 
             // Initialize and bootstrap Tor client

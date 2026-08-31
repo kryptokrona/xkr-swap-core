@@ -122,6 +122,11 @@ pub struct ExchangeRate {
     kucoin_price_updates: Option<crate::kucoin::PriceUpdates>,
     exolix_price_updates: Option<crate::exolix::PriceUpdates>,
     validity_duration: Duration,
+    /// When set, `latest_rate` returns this ask directly and ignores the feeds.
+    /// Used for XKR, which no exchange lists a BTC pair for -- the maker sets a
+    /// manual sats-per-XKR price instead. (1 XKR is the minimum trade unit and
+    /// worth a few sats, so an integer sat price is fine -- no sub-sat needed.)
+    fixed_ask: Option<bitcoin::Amount>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -151,7 +156,22 @@ impl ExchangeRate {
             kucoin_price_updates,
             exolix_price_updates,
             validity_duration,
+            fixed_ask: None,
         })
+    }
+
+    /// A maker rate with a manually set ask (sats per XKR) and no exchange feeds.
+    /// This is the XKR path: there is no BTC/XKR market to feed from.
+    pub fn fixed(ask: bitcoin::Amount, ask_spread: Decimal) -> Self {
+        Self {
+            ask_spread,
+            kraken_price_updates: None,
+            bitfinex_price_updates: None,
+            kucoin_price_updates: None,
+            exolix_price_updates: None,
+            validity_duration: Duration::from_secs(u64::MAX / 2),
+            fixed_ask: Some(ask),
+        }
     }
 }
 
@@ -189,6 +209,10 @@ impl crate::traits::LatestRate for ExchangeRate {
     type Error = Error;
 
     fn latest_rate(&mut self) -> Result<Rate, Self::Error> {
+        // XKR: no exchange feed exists, so use the manually configured ask.
+        if let Some(ask) = self.fixed_ask {
+            return Ok(Rate::new(ask, self.ask_spread));
+        }
         let kraken_update = self
             .kraken_price_updates
             .as_mut()

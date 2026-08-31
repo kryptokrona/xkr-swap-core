@@ -4,6 +4,7 @@ on:
   pull_request:
   release:
     types: [created]
+  workflow_dispatch:
 
 env:
   DOCKER_ASB_IMAGE_NAME: ghcr.io/eigenwallet/asb
@@ -82,6 +83,16 @@ jobs:
 
           BIN_DIR="target/${{ matrix.target.target }}/release"
           echo "BIN_PATH=$BIN_DIR/${{ matrix.bin.name }}${{ matrix.target.ext }}" >> "$GITHUB_ENV"
+
+      # Upload the raw binary so any run (dispatch / PR / release) is downloadable
+      # via `gh run download` -- release runs additionally attach the archive as a
+      # release asset below.
+      - name: Upload binary as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin.name }}-${{ matrix.target.target }}
+          path: ${{ env.BIN_PATH }}
+          if-no-files-found: error
 
       - name: Smoke test the binary
         if: ${{ matrix.target.do_smoke_test }}

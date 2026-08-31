@@ -526,12 +526,26 @@ mod builder {
 
             *context.tor_client.write().await = unbootstrapped_tor_client.clone();
 
-            // XKR port: no Monero wallet. The taker's identity and data directory
-            // are derived from the engine seed (a seed file), its XKR funds live in
-            // the external XKR wallet service, and `monero_manager` stays `None`.
-            let seed = Seed::from_file_or_generate(base_data_dir.as_path())
-                .await
-                .context("Failed to read or generate the engine seed")?;
+            // XKR port: the whole engine wallet (Bitcoin funds + libp2p identity)
+            // derives from one seed. When `XKR_SWAP_SEED_KEY` (64-char hex of the
+            // XKR wallet's private spend key) is set, the seed is derived from it
+            // deterministically, so restoring the XKR wallet restores this wallet
+            // too. Otherwise fall back to a local seed file. XKR funds themselves
+            // live in the external XKR wallet service; `monero_manager` stays None.
+            let seed = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
+                Some(hex_key) => {
+                    let bytes = hex::decode(hex_key.trim())
+                        .context("XKR_SWAP_SEED_KEY is not valid hex")?;
+                    let key: [u8; 32] = bytes
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("XKR_SWAP_SEED_KEY must be 32 bytes"))?;
+                    tracing::info!("Deriving engine seed from the XKR wallet private key");
+                    Seed::from_xkr_spend_key(key)
+                }
+                None => Seed::from_file_or_generate(base_data_dir.as_path())
+                    .await
+                    .context("Failed to read or generate the engine seed")?,
+            };
 
             // Identity = the seed-derived libp2p peer id (stable per taker).
             let identity = seed

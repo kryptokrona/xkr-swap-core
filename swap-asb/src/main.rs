@@ -40,8 +40,8 @@ use swap::protocol::alice::{AliceState, run};
 use swap::protocol::{Database, State};
 use swap::seed::Seed;
 use swap_env::config::{
-    Config, ConfigNotInitialized, initial_setup, query_user_for_initial_config, read_config,
-    validate_config,
+    Config, ConfigNotInitialized, default_config, initial_setup, query_user_for_initial_config,
+    read_config, validate_config,
 };
 use swap_feed;
 use swap_machine::alice::is_complete;
@@ -95,6 +95,22 @@ pub async fn main() -> Result<()> {
 
     // Check in the background if there's a new version available
     tokio::spawn(async move { warn_if_outdated(env!("CARGO_PKG_VERSION")).await });
+
+    // Generate a default config non-interactively and exit. Handled before the
+    // config read below so it never triggers the interactive setup. The wallet
+    // GUI uses this to bootstrap the ASB headlessly (see asb.cjs).
+    if let Command::GenerateConfig { force } = cmd {
+        if config_path.exists() && !force {
+            println!(
+                "Config already exists at {} (use --force to overwrite)",
+                config_path.display()
+            );
+            return Ok(());
+        }
+        initial_setup(config_path.clone(), default_config(testnet, None, None)?)?;
+        println!("Wrote default ASB config to {}", config_path.display());
+        return Ok(());
+    }
 
     // Read our config
     let config = match read_config(config_path.clone())? {
@@ -393,6 +409,9 @@ pub async fn main() -> Result<()> {
         Command::Config => {
             let config_json = serde_json::to_string_pretty(&config)?;
             println!("{}", config_json);
+        }
+        Command::GenerateConfig { .. } => {
+            unreachable!("GenerateConfig is handled before the config read")
         }
         Command::Logs {
             logs_dir,

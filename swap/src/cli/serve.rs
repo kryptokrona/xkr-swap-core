@@ -16,7 +16,8 @@
 
 use crate::cli::api::Context;
 use crate::cli::api::request::{
-    BalanceArgs, BuyXmrDirectArgs, GetHistoryArgs, GetSwapInfosAllArgs, Request, ResumeSwapArgs,
+    BalanceArgs, BuyXmrDirectArgs, GetBitcoinAddressArgs, GetBitcoinTransactionsArgs,
+    GetHistoryArgs, GetSellersArgs, GetSwapInfosAllArgs, Request, ResumeSwapArgs, WithdrawBtcArgs,
 };
 use anyhow::Result;
 use jsonrpsee::RpcModule;
@@ -53,6 +54,15 @@ struct ResumeParams {
     swap_id: String,
 }
 
+#[derive(Deserialize)]
+struct WithdrawBtcParams {
+    /// Destination Bitcoin address.
+    address: String,
+    /// Amount in satoshis. Omit / null to drain the wallet.
+    #[serde(default)]
+    amount_sat: Option<u64>,
+}
+
 /// Serve the taker JSON-RPC API on `host:port` from an already-built `Context`
 /// (its p2p event loop is already running). Blocks until the server stops.
 pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
@@ -80,6 +90,40 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
             .request(ctx)
             .await
             .map_err(rpc_err)?;
+        serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    module.register_async_method("bitcoin_address", |_params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let r = GetBitcoinAddressArgs.request(ctx).await.map_err(rpc_err)?;
+        serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    module.register_async_method("bitcoin_transactions", |_params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let r = GetBitcoinTransactionsArgs
+            .request(ctx)
+            .await
+            .map_err(rpc_err)?;
+        serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    module.register_async_method("list_sellers", |_params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let r = GetSellersArgs.request(ctx).await.map_err(rpc_err)?;
+        serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    module.register_async_method("withdraw_btc", |params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let p: WithdrawBtcParams = params.parse().map_err(rpc_err)?;
+        let args = WithdrawBtcArgs {
+            address: bitcoin::Address::from_str(&p.address)
+                .map_err(rpc_err)?
+                .assume_checked(),
+            amount: p.amount_sat.map(bitcoin::Amount::from_sat),
+        };
+        let r = args.request(ctx).await.map_err(rpc_err)?;
         serde_json::to_value(r).map_err(rpc_err)
     })?;
 

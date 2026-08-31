@@ -280,6 +280,31 @@ impl Request for GetBitcoinAddressArgs {
     }
 }
 
+// GetSellers -- makers discovered via rendezvous, with their live quotes.
+pub struct GetSellersArgs;
+
+impl Request for GetSellersArgs {
+    type Response = Vec<QuoteWithAddress>;
+
+    async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
+        let handle = ctx.try_get_event_loop_handle().await?;
+        let quotes = handle.cached_quotes().borrow().clone();
+        Ok(quotes)
+    }
+}
+
+// GetBitcoinTransactions -- the on-chain Bitcoin wallet's tx history (for the GUI).
+pub struct GetBitcoinTransactionsArgs;
+
+impl Request for GetBitcoinTransactionsArgs {
+    type Response = Vec<bitcoin_wallet::BitcoinTx>;
+
+    async fn request(self, ctx: Arc<Context>) -> Result<Self::Response> {
+        let bitcoin_wallet = ctx.try_get_bitcoin_wallet().await?;
+        bitcoin_wallet.list_transactions().await
+    }
+}
+
 // GetHistory
 #[typeshare]
 #[derive(Serialize, Deserialize, Debug)]

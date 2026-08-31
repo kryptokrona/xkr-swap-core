@@ -44,6 +44,21 @@ impl Seed {
         Ok(Seed(*monero_seed.entropy()))
     }
 
+    /// Deterministically derive the engine seed from the XKR wallet's 32-byte
+    /// private spend key. This makes the whole engine wallet (its Bitcoin funds
+    /// and libp2p identity) recoverable from the XKR wallet alone: restore the XKR
+    /// wallet and this seed -- and everything derived from it -- comes back.
+    ///
+    /// The key is hashed with a domain tag rather than used verbatim as the root
+    /// seed, so the engine seed is not itself the XKR spend key.
+    pub fn from_xkr_spend_key(spend_key: [u8; 32]) -> Self {
+        let mut engine = sha256::HashEngine::default();
+        engine.input(b"XKR_SWAP_ENGINE_SEED");
+        engine.input(&spend_key);
+        let hash = sha256::Hash::from_engine(engine);
+        Seed(hash.to_byte_array())
+    }
+
     pub async fn from_file_or_generate(data_dir: &Path) -> Result<Self> {
         let file_path_buf = data_dir.join("seed.pem");
         let file_path = Path::new(&file_path_buf);

@@ -6,7 +6,9 @@ use crate::cli::api::request::{
 use anyhow::Result;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin_wallet::{Amount, bitcoin_address};
+use libp2p::PeerId;
 use libp2p::core::Multiaddr;
+use swap_p2p::libp2p_ext::MultiAddrExt;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +18,24 @@ use uuid::Uuid;
 
 use super::api::ContextBuilder;
 use super::api::request::GetLogsArgs;
+
+/// Parse XKR rendezvous points from the `XKR_SWAP_RENDEZVOUS` env var: a
+/// comma-separated list of multiaddrs, each including a `/p2p/<peer-id>` part
+/// (e.g. `/ip4/1.2.3.4/tcp/8888/p2p/12D3Koo…`). Unset/empty => no rendezvous
+/// discovery (the taker then only reaches makers it already knows).
+fn rendezvous_points_from_env() -> Vec<(PeerId, Vec<Multiaddr>)> {
+    let raw = match std::env::var("XKR_SWAP_RENDEZVOUS") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => return Vec::new(),
+    };
+    raw.split(',')
+        .filter_map(|s| {
+            let addr: Multiaddr = s.trim().parse().ok()?;
+            let (peer_id, addr) = addr.split_peer_id()?;
+            Some((peer_id, vec![addr]))
+        })
+        .collect()
+}
 
 // See: https://1209k.com/bitcoin-eye/ele.php?chain=btc
 const DEFAULT_ELECTRUM_RPC_URL: &str = "ssl://blockstream.info:700";
@@ -138,6 +158,7 @@ async fn apply_defaults(
                 .with_bitcoin(bitcoin)
                 .with_data_dir(data)
                 .with_json(json)
+                .with_rendezvous_points(rendezvous_points_from_env())
                 .build(context.clone())
                 .await?;
 

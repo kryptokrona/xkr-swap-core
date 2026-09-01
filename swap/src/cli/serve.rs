@@ -27,6 +27,7 @@ use libp2p::{Multiaddr, PeerId};
 use serde::Deserialize;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Map any error into a JSON-RPC error object.
@@ -65,7 +66,34 @@ struct WithdrawBtcParams {
 
 /// Serve the taker JSON-RPC API on `host:port` from an already-built `Context`
 /// (its p2p event loop is already running). Blocks until the server stops.
+/// Keep the Bitcoin wallet balance fresh in the background so the frequently
+/// polled `balance` RPC can return the persisted value instantly instead of
+/// forcing a full electrum sync (which piled up and timed out the client).
+/// Syncs once immediately, then every `SYNC_INTERVAL`. The wallet already
+/// persists its state to disk, so a restart serves the last-known balance until
+/// the first background sync lands.
+fn spawn_background_bitcoin_sync(context: Arc<Context>) {
+    const SYNC_INTERVAL: Duration = Duration::from_secs(30);
+    tokio::spawn(async move {
+        loop {
+            match context.try_get_bitcoin_wallet().await {
+                Ok(wallet) => {
+                    if let Err(error) = wallet.sync().await {
+                        tracing::warn!(?error, "Background Bitcoin sync failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(?error, "Bitcoin wallet not ready for background sync yet");
+                }
+            }
+            tokio::time::sleep(SYNC_INTERVAL).await;
+        }
+    });
+}
+
 pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
+    spawn_background_bitcoin_sync(context.clone());
+
     let mut module: RpcModule<Arc<Context>> = RpcModule::new(context);
 
     module.register_async_method("status", |_params, _ctx, _ext| async move {
@@ -86,7 +114,10 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
 
     module.register_async_method("balance", |_params, ctx, _ext| async move {
         let ctx: Arc<Context> = (*ctx).clone();
-        let r = BalanceArgs { force_refresh: true }
+        // Return the persisted balance WITHOUT forcing an electrum sync. The UI
+        // polls this frequently; a per-call full sync piled up and blew past the
+        // client timeout. `spawn_background_bitcoin_sync` keeps the value fresh.
+        let r = BalanceArgs { force_refresh: false }
             .request(ctx)
             .await
             .map_err(rpc_err)?;

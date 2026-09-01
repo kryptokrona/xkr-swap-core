@@ -38,6 +38,16 @@ pub fn to_xkr_atomic(amount: crate::monero::Amount) -> u64 {
     amount.as_pico() / SCALE
 }
 
+/// Inverse of [`to_xkr_atomic`]: map XKR atomic units back to the engine's
+/// `monero::Amount` (piconero) representation, so a balance read from the XKR
+/// wallet can bound quotes / gate swap setup in the engine's native units.
+pub fn from_xkr_atomic(atomic: u64) -> crate::monero::Amount {
+    const MONERO_DECIMALS: u32 = 12;
+    const XKR_DECIMALS: u32 = 5;
+    const SCALE: u64 = 10u64.pow(MONERO_DECIMALS - XKR_DECIMALS); // 1e7
+    crate::monero::Amount::from_pico(atomic.saturating_mul(SCALE))
+}
+
 /// Adapter over the XKR wallet JSON-RPC service, speaking the engine's types.
 #[derive(Clone)]
 pub struct XkrWallet {
@@ -86,6 +96,23 @@ impl XkrWallet {
             &std::env::var("XKR_ASB_VIEW_SECRET").context("XKR_ASB_VIEW_SECRET not set")?,
         )?;
         Ok((spend, view))
+    }
+
+    /// The maker's own unlocked (spendable) XKR balance as a `monero::Amount`
+    /// (piconero), for bounding quotes and gating swap setup against real funding.
+    /// Reconstructs the wallet from the given keys and syncs. Fails closed: on
+    /// error the caller advertises no capacity / rejects setup rather than
+    /// over-promising XKR the maker cannot actually lock.
+    pub async fn unlocked_balance(
+        &self,
+        spend_secret: [u8; 32],
+        view_secret: [u8; 32],
+    ) -> Result<crate::monero::Amount> {
+        let (unlocked, _locked) = self
+            .client
+            .balance(&Self::hex(spend_secret), &Self::hex(view_secret), None)
+            .await?;
+        Ok(from_xkr_atomic(unlocked))
     }
 
     /// Encode the shared 2-of-2 output keys (`B_A+B_B`, `V_A+V_B`) as a fundable

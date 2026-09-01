@@ -728,11 +728,14 @@ where
                 Ok(alice_states)
             };
 
-            // XKR MVP: quotes are no longer bounded by an on-chain XMR balance and
-            // carry no reserve proof. Funding is enforced when the ASB actually
-            // locks XKR via the wallet service.
+            // Bound quotes by the maker's real unlocked XKR balance (queried from
+            // the wallet service), so the advertised max_buy reflects what the ASB
+            // can actually lock rather than a fake infinite balance. Fails closed:
+            // on error the quote computation errors and no capacity is advertised.
             let get_unlocked_balance = || async {
-                Ok::<_, anyhow::Error>(monero::Amount::from_pico(1_000_000_000_000_000_000u64))
+                let xkr = crate::xkr::XkrWallet::from_env();
+                let (spend, view) = crate::xkr::XkrWallet::asb_keys_from_env()?;
+                xkr.unlocked_balance(spend, view).await
             };
             let get_reserve_proof = || async {
                 Err::<crate::network::quote::ReserveProofWithAddress, anyhow::Error>(anyhow!(
@@ -1359,10 +1362,19 @@ async fn capture_wallet_snapshot(
         .await
         .context("Bitcoin wallet health check failed while capturing wallet snapshot")?;
 
-    // XKR MVP: the ASB no longer reports an on-chain XMR balance here; funding is
-    // enforced when it locks XKR via the wallet service. Advertise a large
-    // placeholder available amount so the swap-setup balance check passes.
-    let unlocked_balance = monero::Amount::from_pico(1_000_000_000_000_000_000u64);
+    // Report the maker's real unlocked XKR balance so the swap-setup balance check
+    // ("unlocked balance too low to fulfill swapping") rejects an under-funded swap
+    // BEFORE the taker locks any BTC -- instead of accepting it and then failing to
+    // lock XKR, which strands the taker until the 600s early-refund. Fails closed:
+    // if the balance can't be read, setup is rejected rather than risked.
+    let unlocked_balance = {
+        let xkr = crate::xkr::XkrWallet::from_env();
+        let (spend, view) = crate::xkr::XkrWallet::asb_keys_from_env()
+            .context("ASB XKR keys required to check funding for swap setup")?;
+        xkr.unlocked_balance(spend, view)
+            .await
+            .context("Failed to query maker XKR balance for swap setup")?
+    };
 
     let redeem_address = external_redeem_address
         .clone()

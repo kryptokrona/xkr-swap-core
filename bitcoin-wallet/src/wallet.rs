@@ -373,10 +373,14 @@ impl<T> std::ops::Deref for CachedFeeEstimator<T> {
 impl Wallet {
     /// If this many consequent addresses are unused, we stop the full scan.
     /// On old wallets we used to generate a ton of unused addresses
-    /// which results in us having a bunch of large gaps in the SPKs
-    const SCAN_STOP_GAP: u32 = 500;
-    /// The batch size for syncing
-    const SCAN_BATCH_SIZE: u32 = 32;
+    /// which results in us having a bunch of large gaps in the SPKs.
+    /// XKR-port engine wallets are always freshly derived from a seed (no
+    /// imported history), so a large gap just makes the initial scan take
+    /// minutes and blocks the daemon from serving; 100 is ample here.
+    const SCAN_STOP_GAP: u32 = 100;
+    /// The batch size for syncing. Larger batches mean fewer (slow) electrum
+    /// round-trips during the initial full scan.
+    const SCAN_BATCH_SIZE: u32 = 100;
     /// The number of maximum chunks to use when syncing
     const SCAN_CHUNKS: u32 = 5;
 

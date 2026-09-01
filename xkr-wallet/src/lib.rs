@@ -184,4 +184,26 @@ impl XkrWalletClient {
             .map(str::to_string)
             .ok_or_else(|| anyhow!("lockSend returned no txHash"))
     }
+
+    /// Unlocked (spendable) and locked balance of the wallet reconstructed from
+    /// the given secrets, in XKR atomic units. Used by the maker to bound quotes
+    /// and gate swap setup against its real XKR funding.
+    pub async fn balance(
+        &self,
+        spend_secret: &str,
+        view_secret: &str,
+        scan_height: Option<u64>,
+    ) -> Result<(u64, u64)> {
+        let mut params = json!({ "spendSecret": spend_secret, "viewSecret": view_secret });
+        if let Some(scan_height) = scan_height {
+            params["scanHeight"] = json!(scan_height);
+        }
+        let result = self.call("balance", params).await?;
+        let unlocked = result
+            .get("unlocked")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("balance returned no unlocked amount"))?;
+        let locked = result.get("locked").and_then(Value::as_u64).unwrap_or(0);
+        Ok((unlocked, locked))
+    }
 }

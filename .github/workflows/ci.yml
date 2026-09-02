@@ -103,6 +103,12 @@ jobs:
         run: cargo test  --lib
 
   docker_tests:
+    # Disabled: these are the upstream Monero <-> BTC swap integration tests
+    # (happy_path / refund / punish, ...). The XKR port replaced the Monero side,
+    # so they no longer apply and just fail -- and the big matrix burns a lot of
+    # Actions minutes. Re-enable (drop `if: false`) once XKR-native integration
+    # tests exist.
+    if: false
     strategy:
       fail-fast: false
       matrix:

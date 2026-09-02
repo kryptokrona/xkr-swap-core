@@ -8,8 +8,8 @@ pub enum XmrBtcNamespace {
     RendezvousPoint,
 }
 
-const MAINNET: &str = "xmr-btc-swap-mainnet";
-const TESTNET: &str = "xmr-btc-swap-testnet";
+const MAINNET: &str = "xkr-btc-swap-mainnet";
+const TESTNET: &str = "xkr-btc-swap-testnet";
 const RENDEZVOUS_POINT: &str = "rendezvous-point";
 
 impl fmt::Display for XmrBtcNamespace {

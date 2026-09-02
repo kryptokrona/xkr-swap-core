@@ -1,6 +1,5 @@
 pub mod request;
 pub mod tauri_bindings;
-mod wallet_setup;
 
 use crate::cli::api::tauri_bindings::ContextStatus;
 use crate::cli::command::{Bitcoin, Monero};
@@ -242,10 +241,7 @@ mod context {
         pub tasks: Arc<PendingTaskList>,
         pub tauri_handle: Option<TauriHandle>,
         pub(super) bitcoin_wallet: Arc<RwLock<Option<Arc<bitcoin_wallet::Wallet>>>>,
-        pub monero_manager: Arc<RwLock<Option<Arc<monero::Wallets>>>>,
         pub(super) tor_client: Arc<RwLock<Option<Arc<TorClient<TokioRustlsRuntime>>>>>,
-        #[allow(dead_code)]
-        pub(super) monero_rpc_pool_handle: Arc<RwLock<Option<Arc<monero_rpc_pool::PoolHandle>>>>,
         pub(super) event_loop_state: Arc<RwLock<Option<EventLoopState>>>,
     }
 
@@ -267,9 +263,7 @@ mod context {
                 tasks: Arc::new(PendingTaskList::default()),
                 tauri_handle,
                 bitcoin_wallet: Arc::new(RwLock::new(None)),
-                monero_manager: Arc::new(RwLock::new(None)),
                 tor_client: Arc::new(RwLock::new(None)),
-                monero_rpc_pool_handle: Arc::new(RwLock::new(None)),
                 event_loop_state: Arc::new(RwLock::new(None)),
             }
         }
@@ -277,7 +271,8 @@ mod context {
         pub async fn status(&self) -> ContextStatus {
             ContextStatus {
                 bitcoin_wallet_available: self.try_get_bitcoin_wallet().await.is_ok(),
-                monero_wallet_available: self.try_get_monero_manager().await.is_ok(),
+                // XKR port: no Monero wallet in the engine.
+                monero_wallet_available: false,
                 database_available: self.try_get_db().await.is_ok(),
                 tor_available: self.try_get_tor_client().await.is_ok(),
             }
@@ -292,14 +287,6 @@ mod context {
                 .context("Bitcoin wallet not initialized")
         }
 
-        /// Get the Monero manager, returning an error if not initialized
-        pub async fn try_get_monero_manager(&self) -> Result<Arc<monero::Wallets>> {
-            self.monero_manager
-                .read()
-                .await
-                .clone()
-                .context("Monero wallet manager not initialized")
-        }
 
         /// Get the database, returning an error if not initialized
         pub async fn try_get_db(&self) -> Result<Arc<dyn Database + Send + Sync>> {
@@ -343,7 +330,6 @@ mod context {
             env_config: EnvConfig,
             db_path: PathBuf,
             bob_bitcoin_wallet: Arc<bitcoin_wallet::Wallet>,
-            bob_monero_wallet: Arc<monero::Wallets>,
         ) -> Self {
             let config = Config::for_harness(seed, env_config);
             let db = open_db(db_path, AccessMode::ReadWrite, None)
@@ -352,14 +338,12 @@ mod context {
 
             Self {
                 bitcoin_wallet: Arc::new(RwLock::new(Some(bob_bitcoin_wallet))),
-                monero_manager: Arc::new(RwLock::new(Some(bob_monero_wallet))),
                 config: Arc::new(RwLock::new(Some(config))),
                 db: Arc::new(RwLock::new(Some(db))),
                 swap_lock: SwapLock::new().into(),
                 tasks: PendingTaskList::default().into(),
                 tauri_handle: None,
                 tor_client: Arc::new(RwLock::new(None)),
-                monero_rpc_pool_handle: Arc::new(RwLock::new(None)),
                 event_loop_state: Arc::new(RwLock::new(None)),
             }
         }
@@ -384,44 +368,6 @@ mod context {
             self.bitcoin_wallet.read().await.clone()
         }
 
-        /// Change the Monero node configuration for all wallets
-        pub async fn change_monero_node(&self, node_config: MoneroNodeConfig) -> Result<()> {
-            let monero_manager = self.try_get_monero_manager().await?;
-
-            // Determine the daemon configuration based on the node config
-            let daemon = match node_config {
-                MoneroNodeConfig::Pool => {
-                    // Use the pool handle to get server info
-                    let pool_handle = self
-                        .monero_rpc_pool_handle
-                        .read()
-                        .await
-                        .clone()
-                        .context("Pool handle not available")?;
-
-                    let server_info = pool_handle.server_info();
-                    let pool_url: String = server_info.clone().into();
-                    tracing::info!("Switching to Monero RPC pool: {}", pool_url);
-
-                    monero_sys::Daemon::try_from(pool_url)?
-                }
-                MoneroNodeConfig::SingleNode { url } => {
-                    tracing::info!("Switching to single Monero node: {}", url);
-
-                    monero_sys::Daemon::try_from(url.clone())?
-                }
-            };
-
-            // Update the wallet manager's daemon configuration
-            monero_manager
-                .change_monero_node(daemon.clone())
-                .await
-                .context("Failed to change Monero node in wallet manager")?;
-
-            tracing::info!(?daemon, "Switched Monero node");
-
-            Ok(())
-        }
     }
 
     impl fmt::Debug for Context {
@@ -440,13 +386,11 @@ mod builder {
     /// A convenient builder struct for [`Context`].
     #[must_use = "ContextBuilder must be built to be useful"]
     pub struct ContextBuilder {
-        monero_config: Option<MoneroNodeConfig>,
         bitcoin: Option<Bitcoin>,
         data: Option<PathBuf>,
         is_testnet: bool,
         json: bool,
         tor: bool,
-        enable_monero_tor: bool,
         tauri_handle: Option<TauriHandle>,
         rendezvous_points: Vec<(PeerId, Vec<Multiaddr>)>,
     }
@@ -464,13 +408,11 @@ mod builder {
         /// Basic builder with default options for mainnet
         pub fn mainnet() -> Self {
             ContextBuilder {
-                monero_config: None,
                 bitcoin: None,
                 data: None,
                 is_testnet: false,
                 json: false,
                 tor: false,
-                enable_monero_tor: false,
                 tauri_handle: None,
                 rendezvous_points: Vec::new(),
             }
@@ -481,12 +423,6 @@ mod builder {
             let mut builder = Self::mainnet();
             builder.is_testnet = true;
             builder
-        }
-
-        /// Configures the Context to initialize a Monero wallet with the given configuration.
-        pub fn with_monero(mut self, monero_config: impl Into<Option<MoneroNodeConfig>>) -> Self {
-            self.monero_config = monero_config.into();
-            self
         }
 
         /// Configures the Context to initialize a Bitcoin wallet with the given configuration.
@@ -516,12 +452,6 @@ mod builder {
         /// Whether to initialize a Tor client (default false)
         pub fn with_tor(mut self, tor: bool) -> Self {
             self.tor = tor;
-            self
-        }
-
-        /// Whether to route Monero wallet traffic through Tor (default false)
-        pub fn with_enable_monero_tor(mut self, enable_monero_tor: bool) -> Self {
-            self.enable_monero_tor = enable_monero_tor;
             self
         }
 
@@ -561,162 +491,79 @@ mod builder {
                 );
             });
 
-            // Prepare parallel initialization tasks
-            let future_seed_choice_and_database = {
+            // Initialize the Tor client. The XKR build has no Monero RPC pool or
+            // Monero wallet database — the taker's XKR side is the external XKR
+            // wallet service.
+            let unbootstrapped_tor_client = if self.tor {
+                match create_tor_client(&base_data_dir).await.inspect_err(|err| {
+                    tracing::warn!(%err, "Failed to create Tor client. We will continue without Tor");
+                }) {
+                    Ok(client) => Some(client),
+                    Err(_) => None,
+                }
+            } else {
+                tracing::warn!("Internal Tor client not enabled, skipping initialization");
+                None
+            };
+
+            // Bootstrap the Tor client in the background; awaited later so the
+            // context waits for Tor to finish bootstrapping.
+            let bootstrap_tor_client_task = AbortOnDropHandle::new(tokio::spawn({
+                let unbootstrapped_tor_client = unbootstrapped_tor_client.clone();
                 let tauri_handle = self.tauri_handle.clone();
 
                 async move {
-                    let wallet_database = monero_sys::Database::new(eigenwallet_data_dir.clone())
-                        .await
-                        .context("Failed to initialize wallet database")?;
-
-                    let seed_choice = match tauri_handle {
-                        Some(tauri_handle) => Some(
-                            wallet_setup::request_seed_choice(
-                                tauri_handle,
-                                &wallet_database,
-                                eigenwallet_data_dir,
-                                None,
-                            )
-                            .await?,
-                        ),
-                        None => None,
-                    };
-
-                    anyhow::Result::<_>::Ok((wallet_database, seed_choice))
+                    if let Some(tor_client) = unbootstrapped_tor_client {
+                        bootstrap_tor_client(tor_client.clone(), tauri_handle.clone())
+                            .await
+                            .inspect_err(|err| {
+                                tracing::warn!(%err, "Failed to bootstrap Tor client. It will remain unbootstrapped");
+                            })
+                            .ok();
+                    }
                 }
-            };
-
-            let future_unbootstrapped_tor_client_rpc_pool = {
-                let tauri_handle = self.tauri_handle.clone();
-                async move {
-                    let unbootstrapped_tor_client = if self.tor {
-                        match create_tor_client(&base_data_dir).await.inspect_err(|err| {
-                            tracing::warn!(%err, "Failed to create Tor client. We will continue without Tor");
-                        }) {
-                            Ok(client) => Some(client),
-                            Err(_) => None,
-                        }
-                    } else {
-                        tracing::warn!("Internal Tor client not enabled, skipping initialization");
-                        None
-                    };
-
-                    // Start Monero RPC pool server
-                    let (server_info, status_receiver, pool_handle) =
-                        monero_rpc_pool::start_server_with_random_port(
-                            monero_rpc_pool::config::Config::new_random_port_with_tor_client(
-                                base_data_dir.join("monero-rpc-pool"),
-                                if self.enable_monero_tor {
-                                    unbootstrapped_tor_client.clone()
-                                } else {
-                                    None
-                                },
-                                match self.is_testnet {
-                                    true => monero::Network::Stagenet,
-                                    false => monero::Network::Mainnet,
-                                },
-                            ),
-                        )
-                        .await?;
-
-                    // Bootstrap Tor client in background
-                    let bootstrap_tor_client_task = AbortOnDropHandle::new(tokio::spawn({
-                        let unbootstrapped_tor_client = unbootstrapped_tor_client.clone();
-                        let tauri_handle = tauri_handle.clone();
-
-                        async move {
-                            if let Some(tor_client) = unbootstrapped_tor_client {
-                                bootstrap_tor_client(tor_client.clone(), tauri_handle.clone())
-                                    .await
-                                    .inspect_err(|err| {
-                                        tracing::warn!(%err, "Failed to bootstrap Tor client. It will remain unbootstrapped");
-                                    })
-                                    .ok();
-                            }
-                        }
-                    }));
-
-                    anyhow::Result::<_>::Ok((
-                        unbootstrapped_tor_client,
-                        bootstrap_tor_client_task,
-                        server_info,
-                        status_receiver,
-                        pool_handle,
-                    ))
-                }
-            };
-
-            let (
-                (wallet_database, seed_choice),
-                (
-                    unbootstrapped_tor_client,
-                    bootstrap_tor_client_task,
-                    server_info,
-                    mut status_receiver,
-                    pool_handle,
-                ),
-            ) = tokio::try_join!(
-                future_seed_choice_and_database,
-                future_unbootstrapped_tor_client_rpc_pool
-            )?;
+            }));
 
             *context.tor_client.write().await = unbootstrapped_tor_client.clone();
 
-            // Forward pool status updates to frontend
-            let pool_tauri_handle = self.tauri_handle.clone();
-            tokio::spawn(async move {
-                while let Ok(status) = status_receiver.recv().await {
-                    pool_tauri_handle.emit_pool_status_update(status);
+            // XKR port: the whole engine wallet (Bitcoin funds + libp2p identity)
+            // derives from one seed. When `XKR_SWAP_SEED_KEY` (64-char hex of the
+            // XKR wallet's private spend key) is set, the seed is derived from it
+            // deterministically, so restoring the XKR wallet restores this wallet
+            // too. Otherwise fall back to a local seed file. XKR funds themselves
+            // live in the external XKR wallet service; `monero_manager` stays None.
+            let seed = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
+                Some(hex_key) => {
+                    let bytes = hex::decode(hex_key.trim())
+                        .context("XKR_SWAP_SEED_KEY is not valid hex")?;
+                    let key: [u8; 32] = bytes
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("XKR_SWAP_SEED_KEY must be 32 bytes"))?;
+                    tracing::info!("Deriving engine seed from the XKR wallet private key");
+                    Seed::from_xkr_spend_key(key)
                 }
-            });
-
-            // Determine Monero daemon to use
-            let (monero_node_address, monero_rpc_pool_handle) = match &self.monero_config {
-                Some(MoneroNodeConfig::Pool) => {
-                    let rpc_url = server_info.into();
-                    (rpc_url, Some(Arc::new(pool_handle)))
-                }
-                Some(MoneroNodeConfig::SingleNode { url }) => (url.clone(), None),
-                None => {
-                    let rpc_url = server_info.into();
-                    (rpc_url, Some(Arc::new(pool_handle)))
-                }
+                None => Seed::from_file_or_generate(base_data_dir.as_path())
+                    .await
+                    .context("Failed to read or generate the engine seed")?,
             };
 
-            *context.monero_rpc_pool_handle.write().await = monero_rpc_pool_handle.clone();
+            // Identity = the seed-derived libp2p peer id (stable per taker).
+            let identity = seed
+                .derive_libp2p_identity()
+                .public()
+                .to_peer_id()
+                .to_string();
 
-            let daemon = monero_sys::Daemon::try_from(monero_node_address)?;
-
-            // Open or create Monero wallet
-            let (wallet, seed) = wallet_setup::open_monero_wallet(
-                self.tauri_handle.clone(),
-                eigenwallet_data_dir,
-                base_data_dir,
-                env_config,
-                &daemon,
-                seed_choice,
-                &wallet_database,
-            )
-            .await?;
-
-            let primary_address = wallet.main_address().await?;
-
-            // Derive wallet-specific data directory
-            let data_dir = base_data_dir
-                .join("identities")
-                .join(primary_address.to_string());
+            let data_dir = base_data_dir.join("identities").join(&identity);
 
             swap_fs::ensure_directory_exists(&data_dir)
                 .context("Failed to create identity directory")?;
 
             tracing::info!(
-                primary_address = %primary_address,
+                %identity,
                 data_dir = %data_dir.display(),
-                "Using wallet-specific data directory"
+                "Using seed-derived identity data directory"
             );
-
-            let wallet_database = Some(Arc::new(wallet_database));
 
             // Initialize config
             *context.config.write().await = Some(Config {
@@ -728,28 +575,6 @@ mod builder {
                 data_dir: data_dir.clone(),
                 log_dir: log_dir.clone(),
             });
-
-            // Initialize Monero wallet manager
-            async {
-                let manager = Arc::new(
-                    monero::Wallets::new_with_existing_wallet(
-                        eigenwallet_data_dir.to_path_buf(),
-                        daemon.clone(),
-                        env_config.monero_network,
-                        false,
-                        self.tauri_handle.clone().map(|th| th.into()),
-                        wallet,
-                        wallet_database,
-                    )
-                    .await
-                    .context("Failed to initialize Monero wallets with existing wallet")?,
-                );
-
-                *context.monero_manager.write().await = Some(manager);
-
-                Ok::<_, Error>(())
-            }
-            .await?;
 
             // Initialize swap database
             let db = async {
@@ -965,20 +790,10 @@ pub mod eigenwallet_data {
     }
 }
 
-impl From<Monero> for MoneroNodeConfig {
-    fn from(monero: Monero) -> Self {
-        match monero.monero_node_address {
-            Some(url) => MoneroNodeConfig::SingleNode {
-                url: url.to_string(),
-            },
-            None => MoneroNodeConfig::Pool,
-        }
-    }
-}
-
 impl From<Monero> for Option<MoneroNodeConfig> {
     fn from(monero: Monero) -> Self {
-        Some(MoneroNodeConfig::from(monero))
+        let _ = monero;
+        None
     }
 }
 

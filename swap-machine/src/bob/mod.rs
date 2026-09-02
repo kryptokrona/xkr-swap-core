@@ -24,58 +24,6 @@ use swap_core::monero::{ScalarExt, TransferProofMaybeWithTxKey};
 use swap_serde::bitcoin::address_serde;
 use uuid::Uuid;
 
-/// Hermes funding below this is considered insufficient to pay the Hermes
-/// transaction's fee, and no Hermes transaction is published.
-pub const HERMES_FUNDING_LOWER_BOUND_PICONERO: u64 = 50_000_000;
-
-/// Progress of the on-chain Hermes channel: construct, publish, then confirm
-/// the transaction.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub enum HermesProgress {
-    /// Haven't determined yet if Hermes can be used.
-    None,
-    /// Building the transaction.
-    Constructing,
-    /// Signed, not yet published.
-    Constructed(
-        #[serde(with = "swap_serde::monero::transaction")]
-        monero_oxide_wallet::transaction::Transaction,
-    ),
-    /// Broadcast, not yet confirmed.
-    Published(
-        #[serde(with = "swap_serde::monero::transaction")]
-        monero_oxide_wallet::transaction::Transaction,
-    ),
-    /// Confirmed on-chain.
-    Confirmed(
-        #[serde(with = "swap_serde::monero::transaction")]
-        monero_oxide_wallet::transaction::Transaction,
-    ),
-}
-
-impl HermesProgress {
-    /// The constructed Hermes transaction, once it exists.
-    pub fn tx(&self) -> Option<&monero_oxide_wallet::transaction::Transaction> {
-        match self {
-            HermesProgress::None | HermesProgress::Constructing => None,
-            HermesProgress::Constructed(tx)
-            | HermesProgress::Published(tx)
-            | HermesProgress::Confirmed(tx) => Some(tx),
-        }
-    }
-}
-
-impl fmt::Display for HermesProgress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            HermesProgress::None => "none",
-            HermesProgress::Constructing => "constructing",
-            HermesProgress::Constructed(_) => "constructed",
-            HermesProgress::Published(_) => "published",
-            HermesProgress::Confirmed(_) => "confirmed",
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum BobState {
@@ -113,29 +61,19 @@ pub enum BobState {
         state: State3,
         lock_transfer_proof: TransferProofMaybeWithTxKey,
         monero_wallet_restore_blockheight: BlockHeight,
-        /// What Alice attached to the lock transaction to fund the Hermes
-        /// transaction. None if she attached no Hermes output.
-        #[serde(default)]
-        hermes_amount: Option<monero::Amount>,
     },
     /// Bob has verified that the correct amount of Monero has been locked and fully confirmed.
     /// It is safe to transmit the encrypted signature to Alice.
     XmrLocked(State4),
-    /// The encrypted signature is ready; we deliver it over two orthogonal
-    /// channels concurrently: the on-chain Hermes channel (`hermes`) and the
-    /// p2p channel (`p2p_sent`). We leave for `EncSigSent` once both complete.
+    /// The encrypted signature is ready; we deliver it to Alice over p2p.
     EncSigReadyToBeSent {
         state: State4,
-        /// Progress of the on-chain Hermes channel.
-        hermes: HermesProgress,
         /// Whether we have already sent it over p2p.
         #[serde(default)]
         p2p_sent: bool,
     },
     EncSigSent {
         state: State4,
-        #[serde(default, with = "swap_serde::monero::transaction::option")]
-        hermes_tx: Option<monero_oxide_wallet::transaction::Transaction>,
     },
     BtcRedeemed(State5),
     WaitingForCancelTimelockExpiration {
@@ -166,21 +104,21 @@ pub enum BobState {
     BtcMercyPublished(State6),
     /// TxMercy has been confirmed. We received the burnt funds back.
     BtcMercyConfirmed(State6),
-    /// We have constructed and signed the Monero redeem transaction but have
-    /// not yet published it.
+    /// We have swept the shared XKR output to our receive address. Unlike Monero
+    /// (which builds an unpublished tx object), the XKR wallet `sweep` constructs,
+    /// signs and broadcasts atomically, so "constructed" already means broadcast;
+    /// we persist only the resulting tx hash. Kept as a distinct state so resume
+    /// after a crash can jump straight to confirming by hash without re-sweeping.
     XmrRedeemConstructed {
         state: State5,
-        /// The signed transaction blob to publish, serialized as wire-format hex.
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_redeem_tx: monero_oxide_wallet::transaction::Transaction,
+        /// The hash of the broadcast XKR sweep transaction.
+        xmr_redeem_txid: String,
     },
-    /// We have published the Monero redeem transaction but it has not yet been
-    /// included in a block.
+    /// The XKR redeem sweep has been broadcast but is not yet confirmed on-chain.
     XmrRedeemPublished {
         state: State5,
-        /// The signed transaction blob we published, serialized as wire-format hex.
-        #[serde(with = "swap_serde::monero::transaction")]
-        xmr_redeem_tx: monero_oxide_wallet::transaction::Transaction,
+        /// The hash of the broadcast XKR sweep transaction.
+        xmr_redeem_txid: String,
     },
     XmrRedeemed {
         tx_lock_id: bitcoin::Txid,
@@ -313,9 +251,9 @@ impl BobState {
     /// internal progress; `None` for atomic states.
     pub fn substate(&self) -> Option<String> {
         match self {
-            BobState::EncSigReadyToBeSent {
-                hermes, p2p_sent, ..
-            } => Some(format!("p2p sent: {p2p_sent}, hermes: {hermes}")),
+            BobState::EncSigReadyToBeSent { p2p_sent, .. } => {
+                Some(format!("p2p sent: {p2p_sent}"))
+            }
             _ => None,
         }
     }
@@ -888,20 +826,10 @@ impl State3 {
         self.xmr
     }
 
-    /// View keys of the Hermes wallet (spend key `s_b`, view key `v`).
-    pub fn hermes_view_keys(&self) -> (monero_oxide_ext::PublicKey, monero::PrivateViewKey) {
-        let S_b_monero = monero_oxide_ext::PublicKey::from_private_key(
-            &monero_oxide_ext::PrivateKey::from_scalar(self.s_b),
-        );
-
-        (S_b_monero, self.v)
-    }
-
     pub fn xmr_locked(
         self,
         monero_wallet_restore_blockheight: BlockHeight,
         lock_transfer_proof: TransferProofMaybeWithTxKey,
-        hermes_amount: Option<monero::Amount>,
     ) -> State4 {
         State4 {
             A: self.A,
@@ -921,7 +849,6 @@ impl State3 {
             refund_signatures: self.refund_signatures,
             monero_wallet_restore_blockheight,
             lock_transfer_proof,
-            hermes_amount,
             S_a_monero: Some(self.S_a_monero),
             tx_redeem_fee: self.tx_redeem_fee,
             tx_refund_fee: self.tx_refund_fee,
@@ -1064,10 +991,6 @@ pub struct State4 {
     refund_signatures: RefundSignatures,
     monero_wallet_restore_blockheight: BlockHeight,
     lock_transfer_proof: TransferProofMaybeWithTxKey,
-    /// What Alice attached to the lock transaction to fund the Hermes
-    /// transaction. None if she attached no Hermes output.
-    #[serde(default)]
-    hermes_amount: Option<monero::Amount>,
     #[serde(with = "::bitcoin::amount::serde::as_sat")]
     tx_redeem_fee: bitcoin::Amount,
     tx_refund_fee: bitcoin::Amount,
@@ -1127,35 +1050,6 @@ impl State4 {
 
     pub fn private_view_key(&self) -> monero::PrivateViewKey {
         self.v
-    }
-
-    /// Whether Alice attached enough Monero to the lock transaction to pay
-    /// the Hermes transaction's fee.
-    pub fn hermes_funding_sufficient(&self) -> bool {
-        self.hermes_amount
-            .is_some_and(|amount| amount.as_pico() > HERMES_FUNDING_LOWER_BOUND_PICONERO)
-    }
-
-    /// Spend key of the Hermes wallet: our Monero spend key share `s_b`.
-    pub fn hermes_wallet_spend_key(&self) -> monero_oxide_ext::PrivateKey {
-        monero_oxide_ext::PrivateKey { scalar: self.s_b }
-    }
-
-    /// Address of the Hermes wallet, funded by Alice via the Monero lock
-    /// transaction and spent by us for the Hermes transaction.
-    pub fn hermes_wallet_address(
-        &self,
-        network: monero_address::Network,
-    ) -> monero_address::MoneroAddress {
-        let public_spend_key =
-            monero_oxide_ext::PublicKey::from_private_key(&self.hermes_wallet_spend_key());
-
-        monero_address::MoneroAddress::new(
-            network,
-            monero_address::AddressType::Legacy,
-            public_spend_key.decompress(),
-            self.v.public().0.decompress(),
-        )
     }
 
     pub async fn watch_for_redeem_btc(
@@ -1276,6 +1170,10 @@ impl State5 {
 
     pub fn tx_lock_id(&self) -> bitcoin::Txid {
         self.tx_lock.txid()
+    }
+
+    pub fn xmr_amount(&self) -> monero::Amount {
+        self.xmr
     }
 }
 

@@ -35,7 +35,8 @@ pub enum AliceState {
     },
     XmrLockTransactionConstructed {
         monero_wallet_restore_blockheight: BlockHeight,
-        xmr_lock_tx: monero_oxide_wallet::transaction::Transaction,
+        /// The hash of the broadcast XKR lock transaction.
+        xmr_lock_txid: String,
         transfer_proof: TransferProof,
         state3: Box<State3>,
     },
@@ -96,15 +97,15 @@ pub enum AliceState {
     /// not yet published it.
     XmrRefundTxConstructed {
         state3: Box<State3>,
-        /// The signed transaction blob to publish.
-        xmr_refund_tx: monero_oxide_wallet::transaction::Transaction,
+        /// The hash of the broadcast XKR refund transaction.
+        xmr_refund_txid: String,
     },
     /// We have published the Monero refund transaction but it has not yet
     /// been included in a block.
     XmrRefundTxPublished {
         state3: Box<State3>,
-        /// The signed transaction blob we published.
-        xmr_refund_tx: monero_oxide_wallet::transaction::Transaction,
+        /// The hash of the broadcast XKR refund transaction.
+        xmr_refund_txid: String,
     },
     /// We have published the Monero refund transaction and it has been
     /// included in a block.
@@ -833,19 +834,10 @@ impl State3 {
         }
     }
 
-    /// Funding for the Hermes wallet (spend key `s_b`, view key `v`), attached
-    /// to the Monero lock transaction. Bob spends it to transmit the encrypted
-    /// signature on-chain.
-    pub fn hermes_funding_transfer_request(&self, amount: monero::Amount) -> TransferRequest {
-        TransferRequest {
-            public_spend_key: self.S_b_monero,
-            public_view_key: self.v.public(),
-            amount,
-        }
-    }
-
-    pub fn hermes_wallet_public_spend_key(&self) -> monero_oxide_ext::PublicKey {
-        self.S_b_monero
+    /// The shared view secret bytes (`v`) for reconstructing the shared XKR wallet
+    /// (e.g. to sweep the shared output during an XKR refund).
+    pub fn xmr_shared_view_secret(&self) -> [u8; 32] {
+        self.v.0.as_bytes()
     }
 
     pub fn tx_cancel(&self) -> TxCancel {

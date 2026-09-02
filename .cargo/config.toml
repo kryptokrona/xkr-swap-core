@@ -14,6 +14,12 @@ rustflags = ["-C", "link-arg=/STACK:8388608"]
 [target.'cfg(all(windows, target_env = "gnu"))']
 linker = "x86_64-w64-mingw32-g++" # Use g++ driver so -lstdc++ gets pulled in automatically
 rustflags = [
+  # Statically link the whole MinGW CRT -- libgcc, libstdc++ AND libwinpthread --
+  # so the .exe is self-contained. Without this, std's threading links
+  # libwinpthread-1.dll dynamically and the binary insta-exits (STATUS_DLL_NOT_FOUND,
+  # 0xC0000135) on a Windows box that lacks the MinGW runtime DLLs.
+  "-C",
+  "target-feature=+crt-static",
   "-C",
   "link-arg=-Wl,--stack,8388608",
   "-C",

@@ -24,10 +24,13 @@ pub struct Swap {
     pub event_loop_handle: cli::SwapEventLoopHandle,
     pub db: Arc<dyn Database + Send + Sync>,
     pub bitcoin_wallet: Arc<dyn BitcoinWallet>,
-    pub monero_wallet: Arc<monero::Wallets>,
     pub env_config: env::Config,
     pub id: Uuid,
     pub monero_receive_pool: MoneroAddressPool,
+    /// Bob's XKR receive address — the redeem sweep destination. Supplied per-swap
+    /// via `BuyXmrArgs` for new swaps (`Swap::new`); not persisted, so a resumed
+    /// swap (`Swap::from_db`) falls back to the `XKR_RECEIVE_ADDRESS` env var.
+    pub xkr_receive_address: String,
     pub event_emitter: Option<TauriHandle>,
 }
 
@@ -37,10 +40,10 @@ impl Swap {
         db: Arc<dyn Database + Send + Sync>,
         id: Uuid,
         bitcoin_wallet: Arc<dyn BitcoinWallet>,
-        monero_wallet: Arc<monero::Wallets>,
         env_config: env::Config,
         event_loop_handle: cli::SwapEventLoopHandle,
         monero_receive_pool: MoneroAddressPool,
+        xkr_receive_address: String,
         bitcoin_change_address: bitcoin::Address,
         btc_amount: bitcoin::Amount,
         tx_lock_fee: bitcoin::Amount,
@@ -54,10 +57,10 @@ impl Swap {
             event_loop_handle,
             db,
             bitcoin_wallet,
-            monero_wallet,
             env_config,
             id,
             monero_receive_pool,
+            xkr_receive_address,
             event_emitter: None,
         }
     }
@@ -67,7 +70,6 @@ impl Swap {
         db: Arc<dyn Database + Send + Sync>,
         id: Uuid,
         bitcoin_wallet: Arc<dyn BitcoinWallet>,
-        monero_wallet: Arc<monero::Wallets>,
         env_config: env::Config,
         event_loop_handle: cli::SwapEventLoopHandle,
         monero_receive_pool: MoneroAddressPool,
@@ -79,10 +81,10 @@ impl Swap {
             event_loop_handle,
             db,
             bitcoin_wallet,
-            monero_wallet,
             env_config,
             id,
             monero_receive_pool,
+            xkr_receive_address: std::env::var("XKR_RECEIVE_ADDRESS").unwrap_or_default(),
             event_emitter: None,
         })
     }

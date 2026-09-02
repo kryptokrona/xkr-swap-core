@@ -19,7 +19,6 @@ bitcoin = { workspace = true }
 
 # Wallets
 bitcoin-wallet = { path = "../bitcoin-wallet" }
-monero-wallet = { path = "../monero-wallet" }
 
 # Tor
 arti-client = { workspace = true, features = ["static-sqlite", "tokio", "rustls", "onion-service-service", "hs-pow-full", "ephemeral-keystore"] }
@@ -58,10 +57,7 @@ monero-address = { workspace = true }
 monero-interface = { workspace = true }
 monero-oxide-ext = { path = "../monero-oxide-ext" }
 monero-oxide-wallet = { workspace = true }
-monero-rpc-pool = { path = "../monero-rpc-pool" }
 monero-seed = { git = "https://github.com/monero-oxide/monero-wallet-util.git", package = "monero-seed" }
-monero-sys = { path = "../monero-sys" }
-monero-wallet-ng = { path = "../monero-wallet-ng" }
 pem = "3.0"
 proptest = "1"
 regex = "1.10"
@@ -71,6 +67,7 @@ safelog = { workspace = true }
 semver = { workspace = true }
 structopt = "0.3"
 swap-controller-api = { path = "../swap-controller-api" }
+xkr-wallet = { path = "../xkr-wallet" }
 swap-core = { path = "../swap-core" }
 swap-db = { path = "../swap-db" }
 swap-env = { path = "../swap-env" }
@@ -124,7 +121,6 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls"] }
 bitcoin-harness = { git = "https://github.com/eigenwallet/bitcoin-harness-rs", branch = "master" }
 data-encoding = { workspace = true }
 mockito = "1.4"
-monero-harness = { path = "../monero-harness" }
 proptest = "1"
 swap-p2p = { path = "../swap-p2p", features = ["test-support"] }
 tempfile = "3"
@@ -133,5 +129,6 @@ tokio = { workspace = true, features = ["test-util"] }
 tracing-ext = { path = "../tracing-ext" }
 
 [build-dependencies]
+embed-manifest = "1.4"
 anyhow = { workspace = true }
 vergen-git2 = { workspace = true }

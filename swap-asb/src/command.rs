@@ -100,6 +100,14 @@ where
             env_config: env_config(testnet),
             cmd: Command::Config,
         },
+        RawCommand::GenerateConfig { force } => Arguments {
+            testnet,
+            json,
+            trace,
+            config_path: config_path(config, testnet)?,
+            env_config: env_config(testnet),
+            cmd: Command::GenerateConfig { force },
+        },
         RawCommand::ExportBitcoinWallet => Arguments {
             testnet,
             json,
@@ -234,6 +242,9 @@ pub enum Command {
         only_unfinished: bool,
     },
     Config,
+    GenerateConfig {
+        force: bool,
+    },
     Logs {
         logs_dir: Option<PathBuf>,
         swap_id: Option<Uuid>,
@@ -354,6 +365,11 @@ pub enum RawCommand {
     },
     #[structopt(about = "Prints the current config")]
     Config,
+    #[structopt(about = "Write a default config.toml non-interactively (for the wallet GUI).")]
+    GenerateConfig {
+        #[structopt(long = "force", help = "Overwrite an existing config file.")]
+        force: bool,
+    },
     #[structopt(about = "Allows withdrawing BTC from the internal Bitcoin wallet.")]
     WithdrawBtc {
         #[structopt(

@@ -1,6 +1,5 @@
 use self::quote::{
     QUOTE_CACHE_TTL, QuoteCacheKey, bitcoin_health_check_with_retry, make_quote,
-    reserve_proof_with_timeout, unlocked_monero_balance_with_timeout,
 };
 use crate::asb::{Behaviour, OutEvent};
 use crate::monero;
@@ -10,7 +9,7 @@ use crate::network::quote::{BidQuote, RefundPolicyWire};
 use crate::network::swap_setup::alice::WalletSnapshot;
 use crate::network::transfer_proof;
 use crate::protocol::alice::swap::has_already_processed_enc_sig;
-use crate::protocol::alice::{AliceState, HermesFundingPolicy, State3, Swap, TipConfig};
+use crate::protocol::alice::{AliceState, State3, Swap};
 use crate::protocol::{Database, State};
 use anyhow::{Context, Result, anyhow, bail};
 use bitcoin_wallet::BitcoinWallet;
@@ -51,15 +50,13 @@ where
     metrics: Option<Metrics>,
     env_config: env::Config,
     bitcoin_wallet: Arc<dyn BitcoinWallet>,
-    monero_wallet: Arc<monero::Wallets>,
     db: Arc<dyn Database + Send + Sync>,
     latest_rate: LR,
     min_buy: bitcoin::Amount,
     max_buy: bitcoin::Amount,
     external_redeem_address: Option<bitcoin::Address>,
     btc_redeem_fee_multiplier: Decimal,
-    developer_tip: TipConfig,
-    hermes_funding_policy: HermesFundingPolicy,
+    developer_tip: Decimal,
     refund_policy: RefundPolicy,
 
     config_path: PathBuf,
@@ -185,15 +182,13 @@ where
         metrics: Option<Metrics>,
         env_config: env::Config,
         bitcoin_wallet: Arc<dyn BitcoinWallet>,
-        monero_wallet: Arc<monero::Wallets>,
         db: Arc<dyn Database + Send + Sync>,
         latest_rate: LR,
         min_buy: bitcoin::Amount,
         max_buy: bitcoin::Amount,
         external_redeem_address: Option<bitcoin::Address>,
         btc_redeem_fee_multiplier: Decimal,
-        developer_tip: TipConfig,
-        hermes_funding_policy: HermesFundingPolicy,
+        developer_tip: Decimal,
         refund_policy: RefundPolicy,
         onion_service_handle: Option<Arc<RunningOnionService>>,
         config_path: PathBuf,
@@ -210,7 +205,6 @@ where
             metrics,
             env_config,
             bitcoin_wallet,
-            monero_wallet,
             db,
             latest_rate,
             swap_sender: swap_channel.sender,
@@ -219,7 +213,6 @@ where
             external_redeem_address,
             btc_redeem_fee_multiplier,
             developer_tip,
-            hermes_funding_policy,
             refund_policy,
             config_path,
             quote_cache,
@@ -280,13 +273,10 @@ where
             let swap = Swap {
                 event_loop_handle: handle,
                 bitcoin_wallet: self.bitcoin_wallet.clone(),
-                monero_wallet: self.monero_wallet.clone(),
                 env_config: self.env_config,
                 db: self.db.clone(),
                 state: state.try_into().expect("Alice state loaded from db"),
                 swap_id,
-                developer_tip: self.developer_tip.clone(),
-                hermes_funding_policy: self.hermes_funding_policy,
             };
 
             match self.swap_sender.send(swap).await {
@@ -307,7 +297,6 @@ where
                     match swarm_event {
                         SwarmEvent::Behaviour(OutEvent::SwapSetupInitiated { mut send_wallet_snapshot }) => {
                             let bitcoin_wallet = self.bitcoin_wallet.clone();
-                            let monero_wallet = self.monero_wallet.clone();
                             let external_redeem_address = self.external_redeem_address.clone();
                             let btc_redeem_fee_multiplier = self.btc_redeem_fee_multiplier;
 
@@ -316,7 +305,7 @@ where
                                 let (btc, responder) = send_wallet_snapshot.recv().await?;
 
                                 // Compute the wallet snapshot
-                                let wallet_snapshot = capture_wallet_snapshot(bitcoin_wallet, &monero_wallet, &external_redeem_address, btc_redeem_fee_multiplier, btc).await?;
+                                let wallet_snapshot = capture_wallet_snapshot(bitcoin_wallet, &external_redeem_address, btc_redeem_fee_multiplier, btc).await?;
 
                                 // This is used further down to then actually respond to the swap setup handler
                                 Ok((btc, responder, wallet_snapshot))
@@ -679,7 +668,7 @@ where
                 .push(self.make_quote_or_use_cached(
                     self.min_buy,
                     self.max_buy,
-                    self.developer_tip.ratio,
+                    self.developer_tip,
                     self.refund_policy.clone().into(),
                 ));
         }
@@ -710,11 +699,7 @@ where
         let quote_cache = self.quote_cache.clone();
         let rate = self.latest_rate.clone();
         let db = self.db.clone();
-        let monero_wallet = self.monero_wallet.clone();
-        let monero_wallet_for_proof = self.monero_wallet.clone();
-        let monero_wallet_for_health = self.monero_wallet.clone();
         let bitcoin_wallet = self.bitcoin_wallet.clone();
-        let peer_id = self.peer_id();
 
         async move {
             // We use the min and max buy amounts to create a unique key for the cache
@@ -743,24 +728,26 @@ where
                 Ok(alice_states)
             };
 
+            // Bound quotes by the maker's real unlocked XKR balance (queried from
+            // the wallet service), so the advertised max_buy reflects what the ASB
+            // can actually lock rather than a fake infinite balance. Fails closed:
+            // on error the quote computation errors and no capacity is advertised.
             let get_unlocked_balance = || async {
-                unlocked_monero_balance_with_timeout(monero_wallet.main_wallet().await).await
+                let xkr = crate::xkr::XkrWallet::from_env();
+                let (spend, view) = crate::xkr::XkrWallet::asb_keys_from_env()?;
+                xkr.unlocked_balance(spend, view).await
+            };
+            let get_reserve_proof = || async {
+                Err::<crate::network::quote::ReserveProofWithAddress, anyhow::Error>(anyhow!(
+                    "reserve proofs are disabled in the XKR port"
+                ))
             };
 
-            let get_reserve_proof = || async move {
-                reserve_proof_with_timeout(monero_wallet_for_proof.main_wallet().await, peer_id)
-                    .await
-            };
-
-            // Quote zero unless both the Bitcoin and Monero backends are reachable.
+            // Quote zero unless the Bitcoin backend is reachable.
             let health_check = async {
                 bitcoin_health_check_with_retry(bitcoin_wallet)
                     .await
                     .context("Bitcoin wallet health check failed")?;
-                monero_wallet_for_health
-                    .rpc_health_check()
-                    .await
-                    .context("Monero daemon RPC health check failed")?;
                 Ok::<(), anyhow::Error>(())
             };
 
@@ -821,13 +808,10 @@ where
         let swap = Swap {
             event_loop_handle: handle,
             bitcoin_wallet: self.bitcoin_wallet.clone(),
-            monero_wallet: self.monero_wallet.clone(),
             env_config: self.env_config,
             db: self.db.clone(),
             state: initial_state,
             swap_id,
-            developer_tip: self.developer_tip.clone(),
-            hermes_funding_policy: self.hermes_funding_policy,
         };
 
         self.db
@@ -1051,13 +1035,10 @@ where
         let swap = Swap {
             event_loop_handle: handle,
             bitcoin_wallet: self.bitcoin_wallet.clone(),
-            monero_wallet: self.monero_wallet.clone(),
             env_config: self.env_config,
             db: self.db.clone(),
             state: new_state,
             swap_id,
-            developer_tip: self.developer_tip.clone(),
-            hermes_funding_policy: self.hermes_funding_policy,
         };
 
         // Send swap to be resumed
@@ -1370,27 +1351,30 @@ fn scale_fee(fee: bitcoin::Amount, multiplier: Decimal) -> Result<bitcoin::Amoun
 
 async fn capture_wallet_snapshot(
     bitcoin_wallet: Arc<dyn BitcoinWallet>,
-    monero_wallet: &monero::Wallets,
     external_redeem_address: &Option<bitcoin::Address>,
     btc_redeem_fee_multiplier: Decimal,
     transfer_amount: bitcoin::Amount,
 ) -> Result<WalletSnapshot> {
     let start_time = Instant::now();
 
-    // Don't back a swap setup against an unreachable Bitcoin or Monero backend.
     bitcoin_wallet
         .health_check()
         .await
         .context("Bitcoin wallet health check failed while capturing wallet snapshot")?;
-    monero_wallet
-        .rpc_health_check()
-        .await
-        .context("Monero daemon RPC health check failed while capturing wallet snapshot")?;
 
-    let unlocked_balance = monero_wallet.main_wallet().await.unlocked_balance().await?;
-    let total_balance = monero_wallet.main_wallet().await.total_balance().await?;
-
-    tracing::info!(%unlocked_balance, %total_balance, "Capturing monero wallet snapshot");
+    // Report the maker's real unlocked XKR balance so the swap-setup balance check
+    // ("unlocked balance too low to fulfill swapping") rejects an under-funded swap
+    // BEFORE the taker locks any BTC -- instead of accepting it and then failing to
+    // lock XKR, which strands the taker until the 600s early-refund. Fails closed:
+    // if the balance can't be read, setup is rejected rather than risked.
+    let unlocked_balance = {
+        let xkr = crate::xkr::XkrWallet::from_env();
+        let (spend, view) = crate::xkr::XkrWallet::asb_keys_from_env()
+            .context("ASB XKR keys required to check funding for swap setup")?;
+        xkr.unlocked_balance(spend, view)
+            .await
+            .context("Failed to query maker XKR balance for swap setup")?
+    };
 
     let redeem_address = external_redeem_address
         .clone()
@@ -1887,52 +1871,6 @@ mod quote {
         .await
     }
 
-    /// Returns the unlocked Monero balance from the wallet
-    pub async fn unlocked_monero_balance_with_timeout(
-        wallet: Arc<crate::monero::Wallet>,
-    ) -> Result<Amount, anyhow::Error> {
-        // First check if the wallet is synchronized
-        // We cannot safely provide a balance if the wallet is not synchronized
-        // We cannot be sure that the balance is accurate
-        // It is dangerous to provide a balancer higher than the actual balance
-        if !timeout(MONERO_WALLET_OPERATION_TIMEOUT, wallet.synchronized())
-            .await?
-            .context("Timeout while checking if wallet is synchronized")?
-        {
-            return Err(anyhow::anyhow!("Wallet is not synchronized"));
-        }
-
-        let balance = timeout(MONERO_WALLET_OPERATION_TIMEOUT, wallet.unlocked_balance())
-            .await?
-            .context("Timeout while getting unlocked balance from Monero wallet")?;
-
-        Ok(balance.into())
-    }
-
-    /// Returns a reserve proof from the wallet with a timeout
-    pub async fn reserve_proof_with_timeout(
-        wallet: Arc<crate::monero::Wallet>,
-        peer_id: libp2p::PeerId,
-    ) -> Result<ReserveProofWithAddress, anyhow::Error> {
-        let message = peer_id.to_string();
-
-        let address = timeout(MONERO_WALLET_OPERATION_TIMEOUT, wallet.main_address())
-            .await?
-            .context("Timeout while getting main address from Monero wallet for reserve proof")?;
-
-        let proof = timeout(
-            MONERO_WALLET_OPERATION_TIMEOUT,
-            wallet.get_reserve_proof(0, None, &message),
-        )
-        .await?
-        .context("Timeout while generating reserve proof")?;
-
-        Ok(ReserveProofWithAddress {
-            address,
-            proof,
-            message,
-        })
-    }
 }
 
 #[allow(missing_debug_implementations)]

@@ -40,5 +40,6 @@ serde_json = { workspace = true }
 structopt = "0.3"
 
 [build-dependencies]
+embed-manifest = "1.4"
 anyhow = { workspace = true }
 vergen = { workspace = true }

@@ -563,7 +563,15 @@ impl EventLoop {
 
                 Some(((peer_id, addr), responder)) = self.add_peer_address_requests.next().fuse() => {
                     tracing::trace!(%peer_id, %addr, "Adding peer address to swarm");
-                    self.swarm.add_peer_address(peer_id, addr);
+                    self.swarm.add_peer_address(peer_id, addr.clone());
+                    // Also teach the "makers" redial behaviour this exact address so
+                    // that when the swap connection drops mid-flight it re-dials HERE
+                    // (the caller-provided address -- e.g. our local HyperSwarm bridge)
+                    // instead of only the maker's identify-advertised addresses (its
+                    // loopback listen addr or a Tor onion), which a bridged taker can't
+                    // reach. Without this, transfer-proof delivery fails after the BTC
+                    // lock and the swap refunds.
+                    self.swarm.behaviour_mut().redial.add_peer_with_address(peer_id, addr);
                     let _ = responder.respond(());
                 },
 

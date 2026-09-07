@@ -606,8 +606,26 @@ async fn init_bitcoin_wallet(
 ) -> Result<bitcoin_wallet::Wallet> {
     tracing::debug!("Opening Bitcoin wallet");
 
+    // Derive the Bitcoin wallet from the XKR wallet key when provided, so the
+    // maker RECEIVES its BTC into the SAME wallet the taker engine uses (both
+    // derive from XKR_SWAP_SEED_KEY) -- one BTC identity across the whole app,
+    // instead of a separate ASB-only wallet the UI couldn't see. The ASB's libp2p
+    // identity keeps using its own file seed (the `seed` arg), so the peer id is
+    // untouched and never collides with the taker engine's.
+    let btc_seed = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
+        Some(hex_key) => {
+            let bytes = hex::decode(hex_key.trim()).context("XKR_SWAP_SEED_KEY is not valid hex")?;
+            let key: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("XKR_SWAP_SEED_KEY must be 32 bytes"))?;
+            tracing::info!("Deriving ASB Bitcoin wallet from the XKR wallet key");
+            Seed::from_xkr_spend_key(key)
+        }
+        None => seed.clone(),
+    };
+
     let wallet = bitcoin_wallet::WalletBuilder::<Seed>::default()
-        .seed(seed.clone())
+        .seed(btc_seed)
         .network(env_config.bitcoin_network)
         .electrum_rpc_urls(
             config

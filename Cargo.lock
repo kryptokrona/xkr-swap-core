@@ -10054,6 +10054,7 @@ dependencies = [
  "bitcoin-wallet",
  "comfy-table",
  "embed-manifest",
+ "hex",
  "libp2p",
  "monero-address",
  "reqwest 0.12.28",

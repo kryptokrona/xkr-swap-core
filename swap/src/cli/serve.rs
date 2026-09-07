@@ -53,6 +53,12 @@ struct BuyXmrDirectParams {
 #[derive(Deserialize)]
 struct ResumeParams {
     swap_id: String,
+    /// Optional fresh dialable address for the maker. Aesir bridges the maker over
+    /// HyperSwarm on an ephemeral local port that dies with the process, so after a
+    /// restart the DB's stored address is dead. Supplying the newly-opened bridge
+    /// address here re-points the peer before resuming, so the swap can reconnect.
+    #[serde(default)]
+    seller_multiaddr: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +168,22 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         let ctx: Arc<Context> = (*ctx).clone();
         let p: ResumeParams = params.parse().map_err(rpc_err)?;
         let swap_id = Uuid::from_str(&p.swap_id).map_err(rpc_err)?;
+        // Re-point the maker at the caller-provided (freshly bridged) address before
+        // resuming; without this, resume keeps dialing the dead stored port.
+        if let Some(addr) = p.seller_multiaddr.as_deref() {
+            let multiaddr = Multiaddr::from_str(addr).map_err(rpc_err)?;
+            let db = ctx.try_get_db().await.map_err(rpc_err)?;
+            if let Ok(peer_id) = db.get_peer_id(swap_id).await {
+                db.insert_address(peer_id, multiaddr.clone())
+                    .await
+                    .map_err(rpc_err)?;
+                let mut handle = ctx.try_get_event_loop_handle().await.map_err(rpc_err)?;
+                handle
+                    .queue_peer_address(peer_id, multiaddr)
+                    .await
+                    .map_err(rpc_err)?;
+            }
+        }
         let r = ResumeSwapArgs { swap_id }
             .request(ctx)
             .await

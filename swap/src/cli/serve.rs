@@ -70,6 +70,12 @@ struct WithdrawBtcParams {
     amount_sat: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct SwapErrorParams {
+    /// The swap to fetch the last recorded failure reason for.
+    swap_id: String,
+}
+
 /// Serve the taker JSON-RPC API on `host:port` from an already-built `Context`
 /// (its p2p event loop is already running). Blocks until the server stops.
 /// Keep the Bitcoin wallet balance fresh in the background so the frequently
@@ -110,6 +116,25 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         let ctx: Arc<Context> = (*ctx).clone();
         let r = GetSwapInfosAllArgs.request(ctx).await.map_err(rpc_err)?;
         serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    // The last recorded failure reason for a swap, if any. A swap that fails
+    // during setup never reaches swap_infos (it has no SwapSetupCompleted state),
+    // so the GUI polls this by swap_id to learn WHY a just-started swap died.
+    module.register_async_method("swap_error", |params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let p: SwapErrorParams = params.parse().map_err(rpc_err)?;
+        let swap_id = Uuid::from_str(&p.swap_id).map_err(rpc_err)?;
+        // (message, terminal): terminal=false means "still trying" (transient),
+        // terminal=true means the swap gave up.
+        let (error, terminal) = match ctx.get_swap_error(&swap_id) {
+            Some((msg, terminal)) => (Some(msg), terminal),
+            None => (None, false),
+        };
+        serde_json::to_value(
+            serde_json::json!({ "swap_id": p.swap_id, "error": error, "terminal": terminal }),
+        )
+        .map_err(rpc_err)
     })?;
 
     module.register_async_method("history", |_params, ctx, _ext| async move {

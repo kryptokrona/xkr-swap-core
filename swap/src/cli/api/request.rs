@@ -1177,6 +1177,23 @@ pub async fn buy_xmr_direct(
         .estimate_fee(swap_core::bitcoin::TxLock::weight(), Some(tx_lock_amount))
         .await?;
 
+    // Pre-flight: make sure the wallet can actually afford the lock (swap amount
+    // + on-chain fee) BEFORE we create the swap, so the caller gets an immediate,
+    // real error instead of a swap that silently fails during setup and never
+    // shows up in swap_infos.
+    let available = bitcoin_wallet
+        .balance()
+        .await
+        .context("Failed to read Bitcoin balance for pre-flight check")?;
+    let required = tx_lock_amount + tx_lock_fee;
+    if available < required {
+        bail!(
+            "Insufficient Bitcoin balance: {available} available, {required} needed \
+             (swap {tx_lock_amount} + network fee {tx_lock_fee}). \
+             Lower the amount or top up your Bitcoin wallet."
+        );
+    }
+
     let monero_receive_pool: MoneroAddressPool =
         swap_serde::monero::address::parse(DUMMY_XMR_ADDRESS)
             .context("failed to parse placeholder monero address")?
@@ -1219,8 +1236,16 @@ pub async fn buy_xmr_direct(
             .await;
 
             match run {
-                Ok(state) => tracing::info!(%swap_id, state = %state, "Direct swap completed"),
-                Err(error) => tracing::error!(%swap_id, "Direct swap failed: {:#}", error),
+                Ok(state) => {
+                    tracing::info!(%swap_id, state = %state, "Direct swap completed");
+                    swap_lock_ctx.clear_swap_error(&swap_id);
+                }
+                Err(error) => {
+                    tracing::error!(%swap_id, "Direct swap failed: {:#}", error);
+                    // Record the reason (terminal) so the GUI can fetch it via the
+                    // `swap_error` RPC and show why the swap didn't get off the ground.
+                    swap_lock_ctx.record_swap_error(swap_id, format!("{error:#}"), true);
+                }
             }
 
             swap_lock_ctx

@@ -14,10 +14,11 @@ use anyhow::{Context as AnyContext, Error, Result, bail};
 use arti_client::TorClient;
 use futures::future::try_join_all;
 use libp2p::{Multiaddr, PeerId};
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 use swap_env::env::{Config as EnvConfig, GetConfig, Mainnet, Testnet};
 use swap_fs::system_data_dir;
 use tauri_bindings::{MoneroNodeConfig, TauriBackgroundProgress, TauriEmitter, TauriHandle};
@@ -243,6 +244,14 @@ mod context {
         pub(super) bitcoin_wallet: Arc<RwLock<Option<Arc<bitcoin_wallet::Wallet>>>>,
         pub(super) tor_client: Arc<RwLock<Option<Arc<TorClient<TokioRustlsRuntime>>>>>,
         pub(super) event_loop_state: Arc<RwLock<Option<EventLoopState>>>,
+        /// Current failure/retry reason per swap_id, for swaps that error
+        /// asynchronously (e.g. a setup that fails or keeps retrying before
+        /// reaching SwapSetupCompleted, and so never appears in swap_infos).
+        /// Value is (message, terminal): terminal=false means "still trying"
+        /// (transient, keep waiting); terminal=true means the swap gave up.
+        /// Surfaced to the GUI via the `swap_error` RPC. A std Mutex (not tokio)
+        /// so the event loop's synchronous retry-notify callback can record too.
+        pub(super) swap_errors: Arc<Mutex<HashMap<Uuid, (String, bool)>>>,
     }
 
     impl Context {
@@ -265,7 +274,34 @@ mod context {
                 bitcoin_wallet: Arc::new(RwLock::new(None)),
                 tor_client: Arc::new(RwLock::new(None)),
                 event_loop_state: Arc::new(RwLock::new(None)),
+                swap_errors: Arc::new(Mutex::new(HashMap::new())),
             }
+        }
+
+        /// A shared handle to the swap-error store, for components outside the
+        /// Context (e.g. the event loop's retry callback) to record into.
+        pub(super) fn swap_error_store(&self) -> Arc<Mutex<HashMap<Uuid, (String, bool)>>> {
+            self.swap_errors.clone()
+        }
+
+        /// Record why a swap failed (terminal=true) or is still retrying
+        /// (terminal=false), so the GUI can fetch it by swap_id.
+        pub fn record_swap_error(&self, swap_id: Uuid, error: String, terminal: bool) {
+            if let Ok(mut map) = self.swap_errors.lock() {
+                map.insert(swap_id, (error, terminal));
+            }
+        }
+
+        /// Clear a swap's recorded error (e.g. once setup succeeds).
+        pub fn clear_swap_error(&self, swap_id: &Uuid) {
+            if let Ok(mut map) = self.swap_errors.lock() {
+                map.remove(swap_id);
+            }
+        }
+
+        /// The current (message, terminal) for a swap, if any.
+        pub fn get_swap_error(&self, swap_id: &Uuid) -> Option<(String, bool)> {
+            self.swap_errors.lock().ok().and_then(|map| map.get(swap_id).cloned())
         }
 
         pub async fn status(&self) -> ContextStatus {
@@ -345,6 +381,7 @@ mod context {
                 tauri_handle: None,
                 tor_client: Arc::new(RwLock::new(None)),
                 event_loop_state: Arc::new(RwLock::new(None)),
+                swap_errors: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
@@ -706,6 +743,7 @@ mod builder {
                     db_for_swarm,
                     self.tauri_handle.clone(),
                     tor_priority_tracker,
+                    context.swap_error_store(),
                 )?;
 
                 let event_loop_task = tokio::spawn(event_loop.run());

@@ -18,7 +18,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{PeerId, Swarm};
 use libp2p_tor::{TorDialPriority, TorDialPriorityTracker};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use swap_core::bitcoin::EncryptedSignature;
 use swap_p2p::protocols::redial;
@@ -157,6 +157,7 @@ impl EventLoop {
         db: Arc<dyn Database + Send + Sync>,
         tauri_handle: Option<TauriHandle>,
         tor_priority_tracker: Option<TorDialPriorityTracker>,
+        swap_errors: Arc<Mutex<HashMap<Uuid, (String, bool)>>>,
     ) -> Result<(Self, EventLoopHandle)> {
         // We still use a timeout here because we trust our own implementation of the swap setup protocol less than the libp2p library
         let (execution_setup_sender, execution_setup_receiver) =
@@ -207,6 +208,7 @@ impl EventLoop {
             add_peer_address_sender,
             refresh_sender,
             cached_quotes_receiver,
+            swap_errors,
         };
 
         Ok((event_loop, handle))
@@ -654,6 +656,11 @@ pub struct EventLoopHandle {
 
     // TODO: Extract the Vec<_> into its own struct (QuotesBatch?)
     cached_quotes_receiver: tokio::sync::watch::Receiver<Vec<QuoteWithAddress>>,
+
+    /// Shared swap-error store (see Context::swap_errors). Written from the
+    /// synchronous retry-notify callback in `setup_swap` so the GUI can show why
+    /// a swap is stuck retrying, not just the eventual terminal failure.
+    swap_errors: Arc<Mutex<HashMap<Uuid, (String, bool)>>>,
 }
 
 impl EventLoopHandle {
@@ -724,7 +731,13 @@ impl EventLoopHandle {
         let backoff =
             retry::give_up_eventually(RETRY_MAX_INTERVAL, EXECUTION_SETUP_MAX_ELAPSED_TIME);
 
-        backoff::future::retry_notify(backoff, || async {
+        // Snapshot what the retry-notify callback needs; it's a synchronous
+        // closure, so it records the current reason into the shared store
+        // (terminal=false = "still trying") for the GUI to poll while we retry.
+        let swap_errors = self.swap_errors.clone();
+        let retry_swap_id = swap.swap_id;
+
+        let result = backoff::future::retry_notify(backoff, || async {
             match self.execution_setup_sender.send_receive((peer_id, swap.clone(), span.clone())).await {
                 Ok(Ok(state2)) => {
                     Ok(state2)
@@ -756,9 +769,26 @@ impl EventLoopHandle {
                 "Failed to setup swap. We will retry in {} seconds",
                 wait_time.as_secs()
             );
+            if let Ok(mut map) = swap_errors.lock() {
+                map.insert(
+                    retry_swap_id,
+                    (format!("Trouble reaching the maker — retrying… ({err:#})"), false),
+                );
+            }
         })
         .await
-        .context("Failed to setup swap after retries")
+        .context("Failed to setup swap after retries");
+
+        // Setup succeeded: drop any lingering "still trying" note so the GUI moves
+        // on to showing swap progress. (A terminal failure is recorded by the
+        // caller's task instead.)
+        if result.is_ok() {
+            if let Ok(mut map) = self.swap_errors.lock() {
+                map.remove(&swap.swap_id);
+            }
+        }
+
+        result
     }
 
     /// Requests a quote from the specified peer

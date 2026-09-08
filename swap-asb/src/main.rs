@@ -612,16 +612,19 @@ async fn init_bitcoin_wallet(
     // instead of a separate ASB-only wallet the UI couldn't see. The ASB's libp2p
     // identity keeps using its own file seed (the `seed` arg), so the peer id is
     // untouched and never collides with the taker engine's.
-    let btc_seed = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
+    let (btc_seed, btc_data_dir) = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
         Some(hex_key) => {
             let bytes = hex::decode(hex_key.trim()).context("XKR_SWAP_SEED_KEY is not valid hex")?;
             let key: [u8; 32] = bytes
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("XKR_SWAP_SEED_KEY must be 32 bytes"))?;
             tracing::info!("Deriving ASB Bitcoin wallet from the XKR wallet key");
-            Seed::from_xkr_spend_key(key)
+            // Persist the XKR-derived wallet in its OWN dir so it never collides
+            // with a wallet DB previously written under the ASB's file seed -- BDK
+            // refuses to open a DB whose descriptor differs from the loaded seed's.
+            (Seed::from_xkr_spend_key(key), config.data.dir.join("xkr-btc"))
         }
-        None => seed.clone(),
+        None => (seed.clone(), config.data.dir.clone()),
     };
 
     let wallet = bitcoin_wallet::WalletBuilder::<Seed>::default()
@@ -636,7 +639,7 @@ async fn init_bitcoin_wallet(
                 .collect::<Vec<String>>(),
         )
         .persister(bitcoin_wallet::PersisterConfig::SqliteFile {
-            data_dir: config.data.dir.clone(),
+            data_dir: btc_data_dir,
         })
         .finality_confirmations(env_config.bitcoin_finality_confirmations)
         .target_block(config.bitcoin.target_block)

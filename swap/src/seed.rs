@@ -59,6 +59,15 @@ impl Seed {
         Seed(hash.to_byte_array())
     }
 
+    /// A short, stable, non-secret id for this seed. Used to give each seed (i.e.
+    /// each opened XKR wallet) its OWN wallet-DB directory, so switching wallets
+    /// never makes BDK try to open a database whose descriptor was written by a
+    /// different wallet's seed (which fails with a descriptor mismatch). It is a
+    /// domain-separated hash of the seed, so it reveals nothing about the seed.
+    pub fn wallet_id(&self) -> String {
+        hex::encode(&self.derive(b"WALLET_DB_ID").bytes()[..8])
+    }
+
     pub async fn from_file_or_generate(data_dir: &Path) -> Result<Self> {
         let file_path_buf = data_dir.join("seed.pem");
         let file_path = Path::new(&file_path_buf);

@@ -337,6 +337,32 @@ pub async fn main() -> Result<()> {
                 };
 
             let bitcoin_wallet = Arc::new(bitcoin_wallet);
+
+            // Redeem maker BTC proceeds to an explicit external address when the
+            // wallet GUI provides one (XKR_ASB_REDEEM_ADDRESS). The GUI sets it to a
+            // fresh address from the app's OWN spendable BTC wallet (the taker
+            // engine's wallet), so proceeds land there -- visible and spendable live
+            // -- instead of piling up in the ASB's separate wallet instance, which
+            // the GUI only notices after a restart's full rescan. Both wallets share
+            // the same seed/descriptor, so this is still "our" money; it just makes
+            // one wallet the single source of truth. Falls back to the config value.
+            let external_redeem_address = match std::env::var("XKR_ASB_REDEEM_ADDRESS")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(addr) => {
+                    let checked = addr
+                        .trim()
+                        .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+                        .context("XKR_ASB_REDEEM_ADDRESS is not a valid Bitcoin address")?
+                        .require_network(env_config.bitcoin_network)
+                        .context("XKR_ASB_REDEEM_ADDRESS is on the wrong Bitcoin network")?;
+                    tracing::info!(address = %checked, "Redeeming maker BTC proceeds to the app wallet address");
+                    Some(checked)
+                }
+                None => config.maker.external_bitcoin_redeem_address,
+            };
+
             let (event_loop, mut swap_receiver, event_loop_service) = EventLoop::new(
                 swarm,
                 metrics,
@@ -346,7 +372,7 @@ pub async fn main() -> Result<()> {
                 kraken_rate.clone(),
                 config.maker.min_buy_btc,
                 config.maker.max_buy_btc,
-                config.maker.external_bitcoin_redeem_address,
+                external_redeem_address,
                 config.maker.btc_redeem_fee_multiplier,
                 developer_tip,
                 config.maker.refund_policy,
@@ -636,10 +662,16 @@ async fn init_bitcoin_wallet(
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("XKR_SWAP_SEED_KEY must be 32 bytes"))?;
             tracing::info!("Deriving ASB Bitcoin wallet from the XKR wallet key");
-            // Persist the XKR-derived wallet in its OWN dir so it never collides
-            // with a wallet DB previously written under the ASB's file seed -- BDK
-            // refuses to open a DB whose descriptor differs from the loaded seed's.
-            (Seed::from_xkr_spend_key(key), config.data.dir.join("xkr-btc"))
+            // Persist the XKR-derived wallet in its OWN dir, keyed by the seed, so
+            // it never collides with (a) the ASB's file-seed wallet, or (b) a DB
+            // written by a DIFFERENT XKR wallet. The app lets the user open any of
+            // several XKR wallets, and each one derives a different Bitcoin wallet;
+            // BDK refuses to open a DB whose descriptor differs from the loaded
+            // seed's, so without the per-seed subdir, opening a second wallet fails
+            // with "Descriptor mismatch". `wallet_id()` gives each wallet its own dir.
+            let btc_seed = Seed::from_xkr_spend_key(key);
+            let btc_dir = config.data.dir.join("xkr-btc").join(btc_seed.wallet_id());
+            (btc_seed, btc_dir)
         }
         None => (seed.clone(), config.data.dir.clone()),
     };

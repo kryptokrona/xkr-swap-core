@@ -220,16 +220,17 @@ pub async fn main() -> Result<()> {
             let price_validity_duration =
                 std::time::Duration::from_secs(config.maker.price_ticker_validity_duration_secs);
             // XKR has no BTC exchange pair to feed from, so the maker sets a fixed
-            // sats-per-XKR ask via `XKR_ASB_PRICE_SATS` (1 XKR ~ a few sats, so an
-            // integer is fine). Falls back to the exchange feeds when unset.
+            // sats-per-XKR ask via `XKR_ASB_PRICE_SATS`. Parsed as a Decimal so
+            // SUB-SATOSHI prices work (1 XKR is often worth a fraction of a sat).
+            // Falls back to the exchange feeds when unset.
             let kraken_rate = match std::env::var("XKR_ASB_PRICE_SATS")
                 .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .filter(|sats| *sats > 0)
+                .and_then(|s| s.trim().parse::<rust_decimal::Decimal>().ok())
+                .filter(|sats| sats.is_sign_positive() && !sats.is_zero())
             {
                 Some(sats) => {
-                    tracing::info!(price_sats = sats, "Using fixed XKR maker price (sats per XKR)");
-                    ExchangeRate::fixed(bitcoin::Amount::from_sat(sats), config.maker.ask_spread)
+                    tracing::info!(price_sats = %sats, "Using fixed XKR maker price (sats per XKR)");
+                    ExchangeRate::fixed(sats, config.maker.ask_spread)
                 }
                 None => ExchangeRate::new(
                     config.maker.ask_spread,

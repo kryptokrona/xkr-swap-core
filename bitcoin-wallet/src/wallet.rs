@@ -1380,8 +1380,14 @@ where
                 }
             })
             .collect();
-        // Most recent first (confirmed by time; unconfirmed -- None -- sort last).
-        out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Most recent first. Unconfirmed txs (no timestamp yet) just happened, so
+        // float them to the top rather than burying them at the bottom.
+        out.sort_by(|a, b| match (a.timestamp, b.timestamp) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less, // a is unconfirmed -> first
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) => y.cmp(&x), // both confirmed -> newer first
+        });
         Ok(out)
     }
 

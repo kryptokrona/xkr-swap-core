@@ -85,7 +85,11 @@ struct SwapErrorParams {
 /// persists its state to disk, so a restart serves the last-known balance until
 /// the first background sync lands.
 fn spawn_background_bitcoin_sync(context: Arc<Context>) {
-    const SYNC_INTERVAL: Duration = Duration::from_secs(30);
+    // Kept short so incoming (received) BTC txs surface in the GUI quickly --
+    // otherwise a deposit can take up to a full interval to appear, which makes
+    // swapping feel unsafe. Sent txs already appear immediately (the wallet knows
+    // them on broadcast); this interval only bounds how fast we notice deposits.
+    const SYNC_INTERVAL: Duration = Duration::from_secs(10);
     tokio::spawn(async move {
         loop {
             match context.try_get_bitcoin_wallet().await {

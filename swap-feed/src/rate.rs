@@ -8,8 +8,11 @@ use std::time::{Duration, Instant};
 /// Represents the rate at which we are willing to trade 1 XMR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rate {
-    /// Represents the asking price from the market.
-    ask: bitcoin::Amount,
+    /// The asking price in satoshis per 1 XMR/XKR. A `Decimal` (not
+    /// `bitcoin::Amount`) so it can represent SUB-SATOSHI prices -- 1 XKR is
+    /// often worth a fraction of a satoshi, so an integer sats price can't
+    /// express the real rate.
+    ask: Decimal,
     /// The spread which should be applied to the market asking price.
     ask_spread: Decimal,
 }
@@ -18,29 +21,18 @@ const ZERO_SPREAD: Decimal = Decimal::ZERO;
 
 impl Rate {
     pub const ZERO: Rate = Rate {
-        ask: bitcoin::Amount::ZERO,
+        ask: Decimal::ZERO,
         ask_spread: ZERO_SPREAD,
     };
 
-    pub fn new(ask: bitcoin::Amount, ask_spread: Decimal) -> Self {
+    /// `ask` is satoshis per 1 XMR/XKR (may be fractional).
+    pub fn new(ask: Decimal, ask_spread: Decimal) -> Self {
         Self { ask, ask_spread }
     }
 
-    /// Computes the asking price at which we are willing to sell 1 XMR.
-    ///
-    /// This applies the spread to the market asking price.
-    pub fn ask(&self) -> Result<bitcoin::Amount> {
-        let sats = self.ask.to_sat();
-        let sats = Decimal::from(sats);
-
-        let additional_sats = sats * self.ask_spread;
-        let additional_sats = bitcoin::Amount::from_sat(
-            additional_sats
-                .to_u64()
-                .context("Failed to fit spread into u64")?,
-        );
-
-        Ok(self.ask + additional_sats)
+    /// Computes the asking price (sats per 1 XMR/XKR) with the spread applied.
+    pub fn ask(&self) -> Result<Decimal> {
+        Ok(self.ask + self.ask * self.ask_spread)
     }
 
     /// Calculate a sell quote for a given BTC amount.
@@ -48,7 +40,8 @@ impl Rate {
         Self::quote(self.ask()?, quote)
     }
 
-    fn quote(rate: bitcoin::Amount, quote: bitcoin::Amount) -> Result<monero_oxide_ext::Amount> {
+    /// `rate` is satoshis per 1 XMR/XKR (may be fractional).
+    fn quote(rate: Decimal, quote: bitcoin::Amount) -> Result<monero_oxide_ext::Amount> {
         // quote (btc) = rate * base (xmr)
         // base = quote / rate
 
@@ -57,7 +50,7 @@ impl Rate {
             .checked_div(Decimal::from(bitcoin::Amount::ONE_BTC.to_sat()))
             .context("Division overflow")?;
 
-        let rate_in_btc = Decimal::from(rate.to_sat())
+        let rate_in_btc = rate
             .checked_div(Decimal::from(bitcoin::Amount::ONE_BTC.to_sat()))
             .context("Division overflow")?;
 
@@ -94,7 +87,12 @@ impl FixedRate {
 
 impl Default for FixedRate {
     fn default() -> Self {
-        let ask = bitcoin::Amount::from_btc(Self::RATE).expect("Static value should never fail");
+        // RATE is in BTC (per XMR); convert to satoshis for the Decimal ask.
+        let ask = Decimal::from(
+            bitcoin::Amount::from_btc(Self::RATE)
+                .expect("Static value should never fail")
+                .to_sat(),
+        );
         let spread = Decimal::from(0u64);
 
         Self(Rate::new(ask, spread))
@@ -124,9 +122,9 @@ pub struct ExchangeRate {
     validity_duration: Duration,
     /// When set, `latest_rate` returns this ask directly and ignores the feeds.
     /// Used for XKR, which no exchange lists a BTC pair for -- the maker sets a
-    /// manual sats-per-XKR price instead. (1 XKR is the minimum trade unit and
-    /// worth a few sats, so an integer sat price is fine -- no sub-sat needed.)
-    fixed_ask: Option<bitcoin::Amount>,
+    /// manual sats-per-XKR price instead. A `Decimal` so sub-satoshi prices work
+    /// (1 XKR is often worth a fraction of a sat).
+    fixed_ask: Option<Decimal>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,9 +158,10 @@ impl ExchangeRate {
         })
     }
 
-    /// A maker rate with a manually set ask (sats per XKR) and no exchange feeds.
-    /// This is the XKR path: there is no BTC/XKR market to feed from.
-    pub fn fixed(ask: bitcoin::Amount, ask_spread: Decimal) -> Self {
+    /// A maker rate with a manually set ask (satoshis per XKR, may be fractional)
+    /// and no exchange feeds. This is the XKR path: there is no BTC/XKR market to
+    /// feed from.
+    pub fn fixed(ask: Decimal, ask_spread: Decimal) -> Self {
         Self {
             ask_spread,
             kraken_price_updates: None,
@@ -236,7 +235,9 @@ impl crate::traits::LatestRate for ExchangeRate {
             exolix_update,
             self.validity_duration,
         )
-        .map(|average_ask| Rate::new(average_ask, self.ask_spread))
+        // Feed prices come back as whole-sat `bitcoin::Amount`; the Rate ask is a
+        // Decimal (sats) so it can also carry a manual sub-sat XKR price.
+        .map(|average_ask| Rate::new(Decimal::from(average_ask.to_sat()), self.ask_spread))
     }
 }
 
@@ -321,7 +322,7 @@ mod tests {
 
     #[test]
     fn sell_quote() {
-        let asking_price = bitcoin::Amount::from_btc(0.002_500).unwrap();
+        let asking_price = Decimal::from(bitcoin::Amount::from_btc(0.002_500).unwrap().to_sat());
         let rate = Rate::new(asking_price, ZERO_SPREAD);
 
         let btc_amount = bitcoin::Amount::from_btc(2.5).unwrap();
@@ -333,18 +334,18 @@ mod tests {
 
     #[test]
     fn applies_spread_to_asking_price() {
-        let asking_price = bitcoin::Amount::from_sat(100);
+        let asking_price = Decimal::from(100u64);
         let rate = Rate::new(asking_price, TWO_PERCENT);
 
         let amount = rate.ask().unwrap();
 
-        assert_eq!(amount.to_sat(), 102);
+        assert_eq!(amount, Decimal::from(102u64));
     }
 
     #[test]
     fn given_spread_of_two_percent_when_caluclating_sell_quote_factor_between_should_be_two_percent()
      {
-        let asking_price = bitcoin::Amount::from_btc(0.004).unwrap();
+        let asking_price = Decimal::from(bitcoin::Amount::from_btc(0.004).unwrap().to_sat());
 
         let rate_no_spread = Rate::new(asking_price, ZERO_SPREAD);
         let rate_with_spread = Rate::new(asking_price, TWO_PERCENT);

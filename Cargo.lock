@@ -10100,6 +10100,7 @@ version = "4.0.0"
 dependencies = [
  "bitcoin 0.32.8",
  "jsonrpsee",
+ "rust_decimal",
  "serde",
  "uuid",
 ]

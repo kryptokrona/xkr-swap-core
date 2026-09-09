@@ -244,10 +244,26 @@ pub async fn main() -> Result<()> {
             };
             let namespace = XmrBtcNamespace::from_is_testnet(testnet);
 
-            // Initialize and bootstrap Tor client
-            let tor_client = create_tor_client(&config.data.dir).await?;
-            bootstrap_tor_client(tor_client.clone(), None).await?;
-            let tor_client = tor_client.into();
+            // Initialize and bootstrap the Tor client ONLY when a Tor-backed
+            // feature is actually enabled. This wallet does its NAT traversal over
+            // HyperSwarm, so the onion hidden service and the wormhole are the only
+            // things that need Tor -- and both are off by default here. Bootstrapping
+            // Tor is slow (tens of seconds on a cold first run, since there's no
+            // cached directory consensus) and, crucially, it blocks startup: the
+            // control RPC below can't bind until this returns, so an unused Tor
+            // bootstrap is exactly what makes "start market-making" time out on a
+            // fresh wallet. The transport treats a `None` client as "no Tor at all".
+            let tor_client = if config.tor.register_hidden_service || config.tor.wormhole_enabled {
+                let tor_client = create_tor_client(&config.data.dir).await?;
+                bootstrap_tor_client(tor_client.clone(), None).await?;
+                Some(tor_client)
+            } else {
+                tracing::info!(
+                    "Tor disabled (no onion hidden service or wormhole configured); \
+                     skipping Tor client bootstrap"
+                );
+                None
+            };
 
             let mut metrics_registry = config
                 .network

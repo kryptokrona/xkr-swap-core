@@ -113,13 +113,27 @@ pub async fn main() -> Result<()> {
     }
 
     // Read our config
-    let config = match read_config(config_path.clone())? {
+    let mut config = match read_config(config_path.clone())? {
         Ok(config) => config,
         Err(ConfigNotInitialized {}) => {
             initial_setup(config_path.clone(), query_user_for_initial_config(testnet)?)?;
             read_config(config_path.clone())?.expect("after initial setup config can be read")
         }
     };
+
+    // Isolate ALL per-wallet state -- swap DB (`sqlite`), libp2p identity
+    // (`seed.pem`), the Bitcoin wallet, Tor state and logs all live under
+    // `data.dir` -- by pointing it at a per-wallet path when the GUI provides one.
+    // The GUI opens different XKR wallets against one shared config file; without
+    // this they'd share one swap DB and cross-contaminate each other's history.
+    if let Some(dir) = std::env::var("XKR_ASB_DATA_DIR").ok().filter(|s| !s.trim().is_empty()) {
+        let dir = std::path::PathBuf::from(dir);
+        // The per-wallet dir won't have been created by initial_setup (that ran for
+        // the config's default dir), so ensure it exists before we write seed.pem /
+        // the sqlite DB / the wallet into it.
+        std::fs::create_dir_all(&dir).context("Failed to create XKR_ASB_DATA_DIR")?;
+        config.data.dir = dir;
+    }
 
     // Initialize tracing
     initialize_tracing(json, &config, trace)?;

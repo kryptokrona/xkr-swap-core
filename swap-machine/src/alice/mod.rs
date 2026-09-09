@@ -152,6 +152,29 @@ pub enum AliceState {
 }
 
 impl AliceState {
+    /// The XKR (Monero) lock transfer proof, present once the maker has locked
+    /// XKR (i.e. from XmrLockTransactionConstructed onward). Used to surface the
+    /// XKR lock txid in the maker's swap list.
+    pub fn transfer_proof(&self) -> Option<&TransferProof> {
+        match self {
+            AliceState::XmrLockTransactionConstructed { transfer_proof, .. }
+            | AliceState::XmrLockTransactionSent { transfer_proof, .. }
+            | AliceState::XmrLocked { transfer_proof, .. }
+            | AliceState::XmrLockTransferProofSent { transfer_proof, .. }
+            | AliceState::EncSigLearned { transfer_proof, .. }
+            | AliceState::BtcRedeemTransactionPublished { transfer_proof, .. }
+            | AliceState::BtcCancelled { transfer_proof, .. }
+            | AliceState::BtcRefunded { transfer_proof, .. }
+            | AliceState::BtcPartiallyRefunded { transfer_proof, .. }
+            | AliceState::XmrRefundable { transfer_proof, .. }
+            | AliceState::WaitingForCancelTimelockExpiration { transfer_proof, .. }
+            | AliceState::CancelTimelockExpired { transfer_proof, .. }
+            | AliceState::BtcPunishable { transfer_proof, .. }
+            | AliceState::BtcPunished { transfer_proof, .. } => Some(transfer_proof),
+            _ => None,
+        }
+    }
+
     /// Returns true if this state is at or past BtcLocked.
     ///
     /// This indicates that the counterparty has committed real funds to the

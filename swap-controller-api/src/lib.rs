@@ -72,6 +72,10 @@ pub struct Swap {
     pub start_date: String,
     pub state: String,
     pub btc_lock_txid: String,
+    /// XKR (Monero) lock transaction hash, once the maker has locked XKR. None
+    /// before the lock. Links to the XKR block explorer in the GUI.
+    #[serde(default)]
+    pub xmr_lock_txid: Option<String>,
     #[serde(with = "bitcoin::amount::serde::as_sat")]
     pub btc_amount: bitcoin::Amount,
     /// Monero amount in piconero

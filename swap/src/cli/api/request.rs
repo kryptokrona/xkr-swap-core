@@ -200,6 +200,10 @@ pub struct GetSwapInfoResponse {
     pub cancel_timelock: CancelTimelock,
     pub punish_timelock: PunishTimelock,
     pub monero_receive_pool: MoneroAddressPool,
+    /// XKR (Monero) lock tx hash, once the maker has locked XKR. None before then.
+    pub xmr_lock_txid: Option<String>,
+    /// XKR (Monero) redeem sweep tx hash, once we've swept the XKR to our wallet.
+    pub xmr_redeem_txid: Option<String>,
 }
 
 impl Request for GetSwapInfoArgs {
@@ -815,6 +819,8 @@ pub async fn get_swap_info(
 
     let swap_state: BobState = state.try_into()?;
 
+    let states = db.get_states(args.swap_id).await?;
+
     let (
         xmr_amount,
         btc_amount,
@@ -825,9 +831,7 @@ pub async fn get_swap_info(
         btc_refund_address,
         cancel_timelock,
         punish_timelock,
-    ) = db
-        .get_states(args.swap_id)
-        .await?
+    ) = states
         .iter()
         .find_map(|state| {
             let State::Bob(BobState::SwapSetupCompleted(state2)) = state else {
@@ -859,6 +863,23 @@ pub async fn get_swap_info(
         })
         .with_context(|| "Did not find SwapSetupCompleted state for swap")?;
 
+    // XKR lock txid: from the first state that carries the lock transfer proof.
+    let xmr_lock_txid = states.iter().find_map(|state| match state {
+        State::Bob(BobState::XmrLockTransactionCandidate { lock_transfer_proof, .. })
+        | State::Bob(BobState::XmrLockTransactionSeen { lock_transfer_proof, .. }) => {
+            Some(lock_transfer_proof.tx_hash().to_string())
+        }
+        _ => None,
+    });
+    // XKR redeem sweep txid: kept by the redeem states (the final XmrRedeemed drops it).
+    let xmr_redeem_txid = states.iter().find_map(|state| match state {
+        State::Bob(BobState::XmrRedeemConstructed { xmr_redeem_txid, .. })
+        | State::Bob(BobState::XmrRedeemPublished { xmr_redeem_txid, .. }) => {
+            Some(xmr_redeem_txid.clone())
+        }
+        _ => None,
+    });
+
     let monero_receive_pool = db.get_monero_address_pool(args.swap_id).await?;
 
     Ok(GetSwapInfoResponse {
@@ -880,6 +901,8 @@ pub async fn get_swap_info(
         cancel_timelock,
         punish_timelock,
         monero_receive_pool,
+        xmr_lock_txid,
+        xmr_redeem_txid,
     })
 }
 

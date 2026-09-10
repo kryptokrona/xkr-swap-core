@@ -13,6 +13,7 @@ path = "src/main.rs"
 # Core
 anyhow = { workspace = true }
 bitcoin = { workspace = true }
+hex = { workspace = true }
 monero-address = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -21,8 +22,6 @@ uuid = { workspace = true, features = ["serde"] }
 
 # Workspace dependencies
 bitcoin-wallet = { path = "../bitcoin-wallet" }
-monero-rpc-pool = { path = "../monero-rpc-pool" }
-monero-sys = { path = "../monero-sys" }
 swap = { path = "../swap" }
 swap-env = { path = "../swap-env" }
 swap-feed = { path = "../swap-feed" }
@@ -42,5 +41,6 @@ serde_json = { workspace = true }
 structopt = "0.3"
 
 [build-dependencies]
+embed-manifest = "1.4"
 anyhow = { workspace = true }
 vergen = { workspace = true }

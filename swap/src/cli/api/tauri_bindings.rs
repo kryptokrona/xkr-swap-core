@@ -4,13 +4,11 @@ use crate::cli::api::request::{
 };
 use crate::cli::list_sellers::QuoteWithAddress;
 use crate::monero::MoneroAddressPool;
-use crate::protocol::bob::HermesProgress;
 use crate::{monero, network::quote::BidQuote};
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use bitcoin::Txid;
 use libp2p::PeerId;
-use monero_rpc_pool::pool::PoolStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -39,7 +37,6 @@ pub enum TauriEvent {
     TimelockChange(TauriTimelockChangeEvent),
     Approval(ApprovalRequest),
     BackgroundProgress(TauriBackgroundProgressWrapper),
-    PoolStatusUpdate(PoolStatus),
     MoneroWalletUpdate(MoneroWalletUpdate),
     P2P(TauriP2PEvent),
 }
@@ -536,44 +533,8 @@ impl bitcoin_wallet::BitcoinTauriBackgroundTask
     }
 }
 
-struct MoneroTauriHandle(TauriHandle);
-
-impl Into<monero_wallet::TauriHandle> for TauriHandle {
-    fn into(self) -> monero_wallet::TauriHandle {
-        Arc::new(MoneroTauriHandle(self))
-    }
-}
-
-impl monero_wallet::MoneroTauriHandle for MoneroTauriHandle {
-    fn balance_change(
-        &self,
-        total_balance: monero_oxide_ext::Amount,
-        unlocked_balance: monero_oxide_ext::Amount,
-    ) {
-        self.0.emit_unified_event(TauriEvent::MoneroWalletUpdate(
-            MoneroWalletUpdate::BalanceChange(GetMoneroBalanceResponse {
-                total_balance: total_balance.into(),
-                unlocked_balance: unlocked_balance.into(),
-            }),
-        ))
-    }
-
-    fn history_update(&self, transactions: Vec<monero_sys::TransactionInfo>) {
-        self.0.emit_unified_event(TauriEvent::MoneroWalletUpdate(
-            MoneroWalletUpdate::HistoryUpdate(GetMoneroHistoryResponse { transactions }),
-        ))
-    }
-
-    fn sync_progress(&self, current_block: u64, target_block: u64, progress_percentage: f32) {
-        self.0.emit_unified_event(TauriEvent::MoneroWalletUpdate(
-            MoneroWalletUpdate::SyncProgress(GetMoneroSyncProgressResponse {
-                current_block,
-                target_block,
-                progress_percentage,
-            }),
-        ))
-    }
-}
+// XKR port: the Monero wallet event bridge (monero_wallet::MoneroTauriHandle)
+// was removed along with the Monero wallet.
 
 impl Display for ApprovalRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -649,10 +610,6 @@ pub trait TauriEmitter {
         self.emit_unified_event(TauriEvent::BackgroundProgress(
             TauriBackgroundProgressWrapper { id, event },
         ));
-    }
-
-    fn emit_pool_status_update(&self, status: PoolStatus) {
-        self.emit_unified_event(TauriEvent::PoolStatusUpdate(status));
     }
 
     fn emit_peer_connection_change(&self, peer_id: PeerId, change: observe::ConnectionChange) {
@@ -1029,29 +986,6 @@ pub enum TauriContextStatusEvent {
     Failed,
 }
 
-/// Data-less mirror of [`HermesProgress`] used to report how far the on-chain
-/// Hermes channel has progressed to the frontend.
-#[typeshare]
-#[derive(Display, Clone, Serialize)]
-pub enum HermesProgressKind {
-    None,
-    Constructing,
-    Constructed,
-    Published,
-    Confirmed,
-}
-
-impl From<&HermesProgress> for HermesProgressKind {
-    fn from(progress: &HermesProgress) -> Self {
-        match progress {
-            HermesProgress::None => HermesProgressKind::None,
-            HermesProgress::Constructing => HermesProgressKind::Constructing,
-            HermesProgress::Constructed(_) => HermesProgressKind::Constructed,
-            HermesProgress::Published(_) => HermesProgressKind::Published,
-            HermesProgress::Confirmed(_) => HermesProgressKind::Confirmed,
-        }
-    }
-}
 
 #[derive(Serialize, Clone)]
 #[typeshare]
@@ -1104,12 +1038,8 @@ pub enum TauriSwapProgressEvent {
     InflightEncSig {
         /// Whether the encrypted signature has been sent over p2p yet.
         p2p_sent: bool,
-        /// How far the on-chain Hermes channel has progressed.
-        hermes: HermesProgressKind,
     },
-    EncryptedSignatureSent {
-        hermes_used: bool,
-    },
+    EncryptedSignatureSent {},
     ConstructingMoneroRedeem,
     PublishingMoneroRedeem {
         xmr_redeem_tx_hex: String,

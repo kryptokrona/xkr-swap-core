@@ -421,7 +421,7 @@ mod tests {
             peer_id: PeerId::random(),
             multiaddr: "/ip4/127.0.0.1/tcp/5678".parse().unwrap(),
             quote: BidQuote {
-                price: Amount::from_btc(0.001).unwrap(),
+                price: rust_decimal::Decimal::from(Amount::from_btc(0.001).unwrap().to_sat()),
                 max_quantity,
                 min_quantity,
                 refund_policy: RefundPolicyWire::FullRefund,

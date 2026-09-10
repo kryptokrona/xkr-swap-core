@@ -15,7 +15,6 @@
 use anyhow::{Context, Result, bail};
 use comfy_table::Table;
 use libp2p::Swarm;
-use monero_sys::Daemon;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use std::convert::TryInto;
@@ -37,12 +36,12 @@ use swap::database::{AccessMode, open_db};
 use swap::monero;
 use swap::network::rendezvous::XmrBtcNamespace;
 use swap::network::swarm;
-use swap::protocol::alice::{AliceState, HermesFundingPolicy, TipConfig, run};
+use swap::protocol::alice::{AliceState, run};
 use swap::protocol::{Database, State};
 use swap::seed::Seed;
 use swap_env::config::{
-    Config, ConfigNotInitialized, initial_setup, query_user_for_initial_config, read_config,
-    validate_config,
+    Config, ConfigNotInitialized, default_config, initial_setup, query_user_for_initial_config,
+    read_config, validate_config,
 };
 use swap_feed;
 use swap_machine::alice::is_complete;
@@ -66,41 +65,6 @@ fn initialize_tracing(json: bool, config: &Config, trace: bool) -> Result<()> {
     );
 
     Ok(())
-}
-
-trait IntoDaemon {
-    fn into_daemon(self) -> Result<Daemon>;
-}
-
-impl IntoDaemon for url::Url {
-    fn into_daemon(self) -> Result<Daemon> {
-        let hostname = self
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("No hostname found in URL"))?
-            .to_string();
-
-        let port = self
-            .port()
-            .ok_or_else(|| anyhow::anyhow!("No port found in URL"))?;
-
-        let ssl = self.scheme() == "https";
-
-        Ok(Daemon {
-            hostname,
-            port,
-            ssl,
-        })
-    }
-}
-
-impl IntoDaemon for monero_rpc_pool::ServerInfo {
-    fn into_daemon(self) -> Result<Daemon> {
-        Ok(Daemon {
-            hostname: self.host,
-            port: self.port,
-            ssl: false,
-        })
-    }
 }
 
 #[tokio::main]
@@ -132,14 +96,44 @@ pub async fn main() -> Result<()> {
     // Check in the background if there's a new version available
     tokio::spawn(async move { warn_if_outdated(env!("CARGO_PKG_VERSION")).await });
 
+    // Generate a default config non-interactively and exit. Handled before the
+    // config read below so it never triggers the interactive setup. The wallet
+    // GUI uses this to bootstrap the ASB headlessly (see asb.cjs).
+    if let Command::GenerateConfig { force } = cmd {
+        if config_path.exists() && !force {
+            println!(
+                "Config already exists at {} (use --force to overwrite)",
+                config_path.display()
+            );
+            return Ok(());
+        }
+        initial_setup(config_path.clone(), default_config(testnet, None, None)?)?;
+        println!("Wrote default ASB config to {}", config_path.display());
+        return Ok(());
+    }
+
     // Read our config
-    let config = match read_config(config_path.clone())? {
+    let mut config = match read_config(config_path.clone())? {
         Ok(config) => config,
         Err(ConfigNotInitialized {}) => {
             initial_setup(config_path.clone(), query_user_for_initial_config(testnet)?)?;
             read_config(config_path.clone())?.expect("after initial setup config can be read")
         }
     };
+
+    // Isolate ALL per-wallet state -- swap DB (`sqlite`), libp2p identity
+    // (`seed.pem`), the Bitcoin wallet, Tor state and logs all live under
+    // `data.dir` -- by pointing it at a per-wallet path when the GUI provides one.
+    // The GUI opens different XKR wallets against one shared config file; without
+    // this they'd share one swap DB and cross-contaminate each other's history.
+    if let Some(dir) = std::env::var("XKR_ASB_DATA_DIR").ok().filter(|s| !s.trim().is_empty()) {
+        let dir = std::path::PathBuf::from(dir);
+        // The per-wallet dir won't have been created by initial_setup (that ran for
+        // the config's default dir), so ensure it exists before we write seed.pem /
+        // the sqlite DB / the wallet into it.
+        std::fs::create_dir_all(&dir).context("Failed to create XKR_ASB_DATA_DIR")?;
+        config.data.dir = dir;
+    }
 
     // Initialize tracing
     initialize_tracing(json, &config, trace)?;
@@ -180,37 +174,8 @@ pub async fn main() -> Result<()> {
                 tracing::info!(%developer_tip, "Tipping to the developers is enabled. Thank you for your support!");
             }
 
-            // Initialize Monero wallet
-            let monero_wallet = init_monero_wallet(&config, env_config).await?;
-            let monero_address = monero_wallet.main_wallet().await.main_address().await?;
-            tracing::info!(%monero_address, "Monero wallet address");
-
-            // Check Monero balance
-            let wallet = monero_wallet.main_wallet().await;
-
-            let total = wallet.total_balance().await?.as_pico();
-            let unlocked = wallet.unlocked_balance().await?.as_pico();
-
-            match (total, unlocked) {
-                (0, _) => {
-                    tracing::warn!(
-                        %monero_address,
-                        "The Monero balance is 0, make sure to deposit funds at",
-                    )
-                }
-                (total, 0) => {
-                    let total = monero::Amount::from_pico(total);
-                    tracing::warn!(
-                        %total,
-                        "Unlocked Monero balance is 0, total balance is",
-                    )
-                }
-                (total, unlocked) => {
-                    let total = monero::Amount::from_pico(total);
-                    let unlocked = monero::Amount::from_pico(unlocked);
-                    tracing::info!(%total, %unlocked, "Monero wallet balance");
-                }
-            }
+            // XKR port: the ASB no longer opens a Monero wallet. Its XKR funds live
+            // in the XKR wallet service, contacted lazily when locking XKR.
 
             // Initialize Bitcoin wallet
             let bitcoin_wallet = init_bitcoin_wallet(&config, &seed, env_config, false).await?;
@@ -268,21 +233,51 @@ pub async fn main() -> Result<()> {
 
             let price_validity_duration =
                 std::time::Duration::from_secs(config.maker.price_ticker_validity_duration_secs);
-            let kraken_rate = ExchangeRate::new(
-                config.maker.ask_spread,
-                kraken_price_updates,
-                bitfinex_price_updates,
-                kucoin_price_updates,
-                exolix_price_updates,
-                price_validity_duration,
-            )
-            .context("Invalid price feed configuration")?;
+            // XKR has no BTC exchange pair to feed from, so the maker sets a fixed
+            // sats-per-XKR ask via `XKR_ASB_PRICE_SATS`. Parsed as a Decimal so
+            // SUB-SATOSHI prices work (1 XKR is often worth a fraction of a sat).
+            // Falls back to the exchange feeds when unset.
+            let kraken_rate = match std::env::var("XKR_ASB_PRICE_SATS")
+                .ok()
+                .and_then(|s| s.trim().parse::<rust_decimal::Decimal>().ok())
+                .filter(|sats| sats.is_sign_positive() && !sats.is_zero())
+            {
+                Some(sats) => {
+                    tracing::info!(price_sats = %sats, "Using fixed XKR maker price (sats per XKR)");
+                    ExchangeRate::fixed(sats, config.maker.ask_spread)
+                }
+                None => ExchangeRate::new(
+                    config.maker.ask_spread,
+                    kraken_price_updates,
+                    bitfinex_price_updates,
+                    kucoin_price_updates,
+                    exolix_price_updates,
+                    price_validity_duration,
+                )
+                .context("Invalid price feed configuration")?,
+            };
             let namespace = XmrBtcNamespace::from_is_testnet(testnet);
 
-            // Initialize and bootstrap Tor client
-            let tor_client = create_tor_client(&config.data.dir).await?;
-            bootstrap_tor_client(tor_client.clone(), None).await?;
-            let tor_client = tor_client.into();
+            // Initialize and bootstrap the Tor client ONLY when a Tor-backed
+            // feature is actually enabled. This wallet does its NAT traversal over
+            // HyperSwarm, so the onion hidden service and the wormhole are the only
+            // things that need Tor -- and both are off by default here. Bootstrapping
+            // Tor is slow (tens of seconds on a cold first run, since there's no
+            // cached directory consensus) and, crucially, it blocks startup: the
+            // control RPC below can't bind until this returns, so an unused Tor
+            // bootstrap is exactly what makes "start market-making" time out on a
+            // fresh wallet. The transport treats a `None` client as "no Tor at all".
+            let tor_client = if config.tor.register_hidden_service || config.tor.wormhole_enabled {
+                let tor_client = create_tor_client(&config.data.dir).await?;
+                bootstrap_tor_client(tor_client.clone(), None).await?;
+                Some(tor_client)
+            } else {
+                tracing::info!(
+                    "Tor disabled (no onion hidden service or wormhole configured); \
+                     skipping Tor client bootstrap"
+                );
+                None
+            };
 
             let mut metrics_registry = config
                 .network
@@ -341,37 +336,9 @@ pub async fn main() -> Result<()> {
                 swarm.add_external_address(external_address.clone());
             }
 
-            let tip_config = {
-                let tip_address = monero_address::MoneroAddress::from_str_with_unchecked_network(
-                    match env_config.monero_network {
-                        monero::Network::Mainnet => {
-                            swap_env::defaults::DEFAULT_DEVELOPER_TIP_ADDRESS_MAINNET
-                        }
-                        monero::Network::Stagenet => {
-                            swap_env::defaults::DEFAULT_DEVELOPER_TIP_ADDRESS_STAGENET
-                        }
-                        monero::Network::Testnet => panic!("Testnet is not supported"),
-                    },
-                )
-                .expect("Hardcoded developer tip address to be valid");
-
-                assert_eq!(
-                    tip_address.network(),
-                    env_config.monero_network,
-                    "Developer tip address must be on the correct Monero network"
-                );
-
-                TipConfig {
-                    ratio: config.maker.developer_tip,
-                    address: tip_address,
-                }
-            };
-
-            let hermes_funding_policy = HermesFundingPolicy {
-                enabled: config.maker.hermes_enabled,
-                amount: monero::Amount::from_pico(config.maker.hermes_funding_amount_piconero),
-                min_swap_amount: config.maker.hermes_min_swap_amount,
-            };
+            // XKR port: the developer-tip and Hermes on-chain features were
+            // removed. The event loop still takes the tip ratio for quote pricing.
+            let developer_tip = config.maker.developer_tip;
 
             let (metrics, _metrics_server) =
                 match (config.network.prometheus_port, metrics_registry) {
@@ -384,20 +351,44 @@ pub async fn main() -> Result<()> {
                 };
 
             let bitcoin_wallet = Arc::new(bitcoin_wallet);
+
+            // Redeem maker BTC proceeds to an explicit external address when the
+            // wallet GUI provides one (XKR_ASB_REDEEM_ADDRESS). The GUI sets it to a
+            // fresh address from the app's OWN spendable BTC wallet (the taker
+            // engine's wallet), so proceeds land there -- visible and spendable live
+            // -- instead of piling up in the ASB's separate wallet instance, which
+            // the GUI only notices after a restart's full rescan. Both wallets share
+            // the same seed/descriptor, so this is still "our" money; it just makes
+            // one wallet the single source of truth. Falls back to the config value.
+            let external_redeem_address = match std::env::var("XKR_ASB_REDEEM_ADDRESS")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(addr) => {
+                    let checked = addr
+                        .trim()
+                        .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+                        .context("XKR_ASB_REDEEM_ADDRESS is not a valid Bitcoin address")?
+                        .require_network(env_config.bitcoin_network)
+                        .context("XKR_ASB_REDEEM_ADDRESS is on the wrong Bitcoin network")?;
+                    tracing::info!(address = %checked, "Redeeming maker BTC proceeds to the app wallet address");
+                    Some(checked)
+                }
+                None => config.maker.external_bitcoin_redeem_address,
+            };
+
             let (event_loop, mut swap_receiver, event_loop_service) = EventLoop::new(
                 swarm,
                 metrics,
                 env_config,
                 bitcoin_wallet.clone(),
-                monero_wallet.clone(),
                 db.clone(),
                 kraken_rate.clone(),
                 config.maker.min_buy_btc,
                 config.maker.max_buy_btc,
-                config.maker.external_bitcoin_redeem_address,
+                external_redeem_address,
                 config.maker.btc_redeem_fee_multiplier,
-                tip_config,
-                hermes_funding_policy,
+                developer_tip,
                 config.maker.refund_policy,
                 onion_service_handle,
                 config_path.clone(),
@@ -411,7 +402,6 @@ pub async fn main() -> Result<()> {
                     port,
                     rpc_auth_verifier,
                     bitcoin_wallet.clone(),
-                    monero_wallet.clone(),
                     event_loop_service,
                     db,
                 )
@@ -490,6 +480,9 @@ pub async fn main() -> Result<()> {
             let config_json = serde_json::to_string_pretty(&config)?;
             println!("{}", config_json);
         }
+        Command::GenerateConfig { .. } => {
+            unreachable!("GenerateConfig is handled before the config read")
+        }
         Command::Logs {
             logs_dir,
             swap_id,
@@ -526,14 +519,10 @@ pub async fn main() -> Result<()> {
             bitcoin_wallet.broadcast(signed_tx, "withdraw").await?;
         }
         Command::Balance => {
-            let monero_wallet = init_monero_wallet(&config, env_config).await?;
-            let monero_balance = monero_wallet.main_wallet().await.total_balance().await?;
-            tracing::info!(%monero_balance);
-
+            // XKR port: XKR funds live in the XKR wallet service, not here.
             let bitcoin_wallet = init_bitcoin_wallet(&config, &seed, env_config, true).await?;
             let bitcoin_balance = bitcoin_wallet.balance().await?;
-            tracing::info!(%bitcoin_balance);
-            tracing::info!(%bitcoin_balance, %monero_balance, "Current balance");
+            tracing::info!(%bitcoin_balance, "Current Bitcoin balance");
         }
         Command::Cancel { swap_id } => {
             let db = open_db(db_file, AccessMode::ReadWrite, None).await?;
@@ -548,11 +537,10 @@ pub async fn main() -> Result<()> {
             let db = open_db(db_file, AccessMode::ReadWrite, None).await?;
 
             let bitcoin_wallet = init_bitcoin_wallet(&config, &seed, env_config, true).await?;
-            let monero_wallet = init_monero_wallet(&config, env_config).await?;
 
-            refund(swap_id, Arc::new(bitcoin_wallet), monero_wallet.clone(), db).await?;
+            refund(swap_id, Arc::new(bitcoin_wallet), db).await?;
 
-            tracing::info!("Monero successfully refunded");
+            tracing::info!("XKR successfully refunded");
         }
         Command::Punish { swap_id } => {
             let db = open_db(db_file, AccessMode::ReadWrite, None).await?;
@@ -601,14 +589,9 @@ pub async fn main() -> Result<()> {
             println!("{}", wallet_export)
         }
         Command::ExportMoneroWallet => {
-            let monero_wallet = init_monero_wallet(&config, env_config).await?;
-            let main_wallet = monero_wallet.main_wallet().await;
-
-            let seed = main_wallet.seed().await?;
-            let creation_height = main_wallet.creation_height().await?;
-
-            println!("Seed          : {seed}");
-            println!("Restore height: {creation_height}");
+            // XKR port: the ASB has no Monero wallet. XKR keys are managed by the
+            // XKR wallet service.
+            println!("This build uses XKR, not Monero; there is no Monero wallet to export.");
         }
         Command::ExportMoneroLockWallet { swap_id } => {
             let db = open_db(db_file, AccessMode::ReadWrite, None).await?;
@@ -680,8 +663,35 @@ async fn init_bitcoin_wallet(
 ) -> Result<bitcoin_wallet::Wallet> {
     tracing::debug!("Opening Bitcoin wallet");
 
+    // Derive the Bitcoin wallet from the XKR wallet key when provided, so the
+    // maker RECEIVES its BTC into the SAME wallet the taker engine uses (both
+    // derive from XKR_SWAP_SEED_KEY) -- one BTC identity across the whole app,
+    // instead of a separate ASB-only wallet the UI couldn't see. The ASB's libp2p
+    // identity keeps using its own file seed (the `seed` arg), so the peer id is
+    // untouched and never collides with the taker engine's.
+    let (btc_seed, btc_data_dir) = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
+        Some(hex_key) => {
+            let bytes = hex::decode(hex_key.trim()).context("XKR_SWAP_SEED_KEY is not valid hex")?;
+            let key: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("XKR_SWAP_SEED_KEY must be 32 bytes"))?;
+            tracing::info!("Deriving ASB Bitcoin wallet from the XKR wallet key");
+            // Persist the XKR-derived wallet in its OWN dir, keyed by the seed, so
+            // it never collides with (a) the ASB's file-seed wallet, or (b) a DB
+            // written by a DIFFERENT XKR wallet. The app lets the user open any of
+            // several XKR wallets, and each one derives a different Bitcoin wallet;
+            // BDK refuses to open a DB whose descriptor differs from the loaded
+            // seed's, so without the per-seed subdir, opening a second wallet fails
+            // with "Descriptor mismatch". `wallet_id()` gives each wallet its own dir.
+            let btc_seed = Seed::from_xkr_spend_key(key);
+            let btc_dir = config.data.dir.join("xkr-btc").join(btc_seed.wallet_id());
+            (btc_seed, btc_dir)
+        }
+        None => (seed.clone(), config.data.dir.clone()),
+    };
+
     let wallet = bitcoin_wallet::WalletBuilder::<Seed>::default()
-        .seed(seed.clone())
+        .seed(btc_seed)
         .network(env_config.bitcoin_network)
         .electrum_rpc_urls(
             config
@@ -692,7 +702,7 @@ async fn init_bitcoin_wallet(
                 .collect::<Vec<String>>(),
         )
         .persister(bitcoin_wallet::PersisterConfig::SqliteFile {
-            data_dir: config.data.dir.clone(),
+            data_dir: btc_data_dir,
         })
         .finality_confirmations(env_config.bitcoin_finality_confirmations)
         .target_block(config.bitcoin.target_block)
@@ -711,57 +721,6 @@ async fn init_bitcoin_wallet(
     }
 
     Ok(wallet)
-}
-
-async fn init_monero_wallet(
-    config: &Config,
-    env_config: swap_env::env::Config,
-) -> Result<Arc<monero::Wallets>> {
-    tracing::debug!("Initializing Monero wallets");
-
-    let daemon = match &config.monero.daemon_url {
-        // If a daemon URL is provided, use it
-        Some(url) => {
-            tracing::info!("Using direct Monero daemon connection: {url}");
-
-            url.clone()
-                .into_daemon()
-                .context("Failed to convert daemon URL to Daemon")?
-        }
-        // If no daemon URL is provided, start the monero-rpc-pool and use it
-        None => {
-            let (server_info, _status_receiver, _pool_handle) =
-                monero_rpc_pool::start_server_with_random_port(
-                    monero_rpc_pool::config::Config::new_random_port(
-                        config.data.dir.join("monero-rpc-pool"),
-                        env_config.monero_network,
-                    ),
-                )
-                .await
-                .context("Failed to start Monero RPC Pool for ASB")?;
-
-            let pool_url = format!("http://{}:{}", server_info.host, server_info.port);
-            tracing::info!("Monero RPC Pool started for ASB on {}", pool_url);
-
-            server_info
-                .into_daemon()
-                .context("Failed to convert ServerInfo to Daemon")?
-        }
-    };
-
-    let manager = monero::Wallets::new(
-        config.data.dir.join("monero/wallets"),
-        DEFAULT_WALLET_NAME.to_string(),
-        daemon,
-        env_config.monero_network,
-        false,
-        None,
-        None,
-    )
-    .await
-    .context("Failed to initialize Monero wallets")?;
-
-    Ok(Arc::new(manager))
 }
 
 /// This struct is used to extract swap details from the database and print them in a table format

@@ -21,6 +21,7 @@ pub mod cli;
 pub mod common;
 pub mod database;
 pub mod monero;
+pub mod xkr;
 pub mod network;
 pub mod protocol;
 pub mod seed;

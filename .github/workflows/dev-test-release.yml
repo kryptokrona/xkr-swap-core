@@ -3,8 +3,8 @@ name: "Create dev test release"
 # Allows a developer to build a release from a specific commit hash for testing
 # purposes. The resulting release is a GitHub pre-release tagged
 # `test-<short-sha>-<timestamp>` and is wired up so that the existing build
-# workflows (build-release-binaries.yml, build-gui-release-binaries.yml) build
-# binaries and attach them to the release, but DO NOT:
+# workflow (build-release-binaries.yml) builds the CLI binaries (swap, asb,
+# rendezvous-node, ...) and attaches them to the release, but DO NOT:
 #   - push Docker images to ghcr
 #   - upload to crabnebula
 #   - update the Homebrew formula

@@ -496,3 +496,93 @@ pub fn query_user_for_initial_config(testnet: bool) -> Result<Config> {
 
     query_user_for_initial_config_with_network(bitcoin_network, monero_network)
 }
+
+/// Parse rendezvous multiaddrs from the `XKR_SWAP_RENDEZVOUS` env var (comma
+/// separated, each with a `/p2p/<peer-id>` part). Unset/empty => none.
+fn rendezvous_points_from_env() -> Vec<Multiaddr> {
+    match std::env::var("XKR_SWAP_RENDEZVOUS") {
+        Ok(s) if !s.trim().is_empty() => s
+            .split(',')
+            .filter_map(|a| a.trim().parse::<Multiaddr>().ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Build a default ASB config non-interactively. The wallet GUI uses this to
+/// generate a `config.toml` headlessly (see `swap-asb generate-config`).
+/// `data_dir` and `electrum_rpc_urls` override the network defaults when given.
+///
+/// NOTE: the resulting maker still needs a FUNDED XKR wallet (keys via the
+/// `XKR_ASB_SPEND_SECRET` / `XKR_ASB_VIEW_SECRET` env vars) before it can lock
+/// XKR and complete swaps -- that funding is out of scope for config generation.
+pub fn default_config(
+    testnet: bool,
+    data_dir: Option<PathBuf>,
+    electrum_rpc_urls: Option<Vec<Url>>,
+) -> Result<Config> {
+    let (bitcoin_network, monero_network) = if testnet {
+        (bitcoin::Network::Testnet, monero_address::Network::Stagenet)
+    } else {
+        (bitcoin::Network::Bitcoin, monero_address::Network::Mainnet)
+    };
+
+    let defaults = if testnet {
+        Testnet::get_config_file_defaults()?
+    } else {
+        Mainnet::get_config_file_defaults()?
+    };
+
+    Ok(Config {
+        data: Data {
+            dir: data_dir.unwrap_or(defaults.data_dir),
+        },
+        network: Network {
+            listen: vec![defaults.listen_address_tcp],
+            // Register at the XKR rendezvous point(s) so takers can discover this
+            // maker. Sourced from `XKR_SWAP_RENDEZVOUS` (same var the taker uses).
+            rendezvous_point: rendezvous_points_from_env(),
+            external_addresses: vec![],
+            prometheus_port: None,
+        },
+        bitcoin: Bitcoin {
+            electrum_rpc_urls: electrum_rpc_urls.unwrap_or(defaults.electrum_rpc_urls),
+            target_block: defaults.bitcoin_confirmation_target,
+            finality_confirmations: None,
+            network: bitcoin_network,
+            use_mempool_space_fee_estimation: defaults.use_mempool_space_fee_estimation,
+        },
+        monero: Monero {
+            daemon_url: None,
+            finality_confirmations: None,
+            network: monero_network,
+        },
+        tor: TorConf {
+            register_hidden_service: false,
+            ..Default::default()
+        },
+        maker: Maker {
+            min_buy_btc: bitcoin::Amount::from_sat(10_000),
+            max_buy_btc: bitcoin::Amount::from_sat(10_000_000),
+            ask_spread: Decimal::new(2, 2), // 0.02
+            price_ticker_ws_url_kraken: defaults.price_ticker_ws_url_kraken,
+            price_ticker_ws_url_bitfinex: defaults.price_ticker_ws_url_bitfinex,
+            price_ticker_rest_url_kucoin: defaults.price_ticker_rest_url_kucoin,
+            price_ticker_rest_url_exolix: defaults.price_ticker_rest_url_exolix,
+            price_ticker_source_exolix_api_key: None,
+            price_ticker_rest_poll_interval_exolix_secs:
+                default_price_ticker_rest_poll_interval_exolix_secs(),
+            price_ticker_validity_duration_secs: default_price_ticker_validity_duration_secs(),
+            price_ticker_source_kraken_enabled: default_price_ticker_source_enabled(),
+            price_ticker_source_bitfinex_enabled: default_price_ticker_source_enabled(),
+            price_ticker_source_kucoin_enabled: default_price_ticker_source_enabled(),
+            external_bitcoin_redeem_address: None,
+            btc_redeem_fee_multiplier: default_btc_redeem_fee_multiplier(),
+            developer_tip: defaults.developer_tip,
+            hermes_funding_amount_piconero: default_hermes_funding_amount_piconero(),
+            hermes_enabled: default_hermes_enabled(),
+            hermes_min_swap_amount: default_hermes_min_swap_amount(),
+            refund_policy: defaults.refund_policy,
+        },
+    })
+}

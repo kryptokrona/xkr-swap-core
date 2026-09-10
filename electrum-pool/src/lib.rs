@@ -73,6 +73,20 @@ where
             .map_err(|e| Error::IOError(std::io::Error::other(e.to_string())))?
     }
 
+    /// Drop the cached client at `idx` so the next `get_or_init_client_*` builds a
+    /// fresh connection. Clients live in a `OnceCell` and are otherwise cached for
+    /// the whole process, so a socket that dies mid-run (classically: the machine
+    /// slept and every TCP connection was severed) would stay wedged forever and
+    /// every call would keep failing until restart. Resetting the cell on failure
+    /// lets the pool self-heal by reconnecting.
+    fn invalidate_client(&self, idx: usize) {
+        if let Ok(mut clients) = self.clients.write()
+            && idx < clients.len()
+        {
+            clients[idx] = Arc::new(OnceCell::new());
+        }
+    }
+
     /// Create a new balancer from a list of Electrum URLs with default configuration.
     pub async fn new_with_factory(
         urls: Vec<String>,
@@ -261,6 +275,9 @@ where
                         "Electrum operation failed, switching to next client"
                     );
 
+                    // Drop this (possibly dead) connection so the next pass reconnects
+                    // instead of reusing a wedged socket -- see `invalidate_client`.
+                    self.invalidate_client(idx);
                     errors.push(err);
                 }
             }

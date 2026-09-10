@@ -100,7 +100,7 @@ pub const CONSERVATIVE_MONERO_FEE: Amount = Amount::from_pico(3_000_000_000);
 pub trait AmountExt {
     fn max_conservative_giveable(&self) -> Self;
     fn min_conservative_balance_to_spend(&self) -> Self;
-    fn max_bitcoin_for_price(&self, ask_price: bitcoin::Amount) -> Option<bitcoin::Amount>;
+    fn max_bitcoin_for_price(&self, ask_price: Decimal) -> Option<bitcoin::Amount>;
 }
 impl AmountExt for Amount {
     /// Calculate the conservative max giveable of Monero we can spent given [`self`] is the balance
@@ -127,15 +127,15 @@ impl AmountExt for Amount {
 
     /// Calculate the maximum amount of Bitcoin that can be bought at a given
     /// asking price for this amount of Monero including the median fee.
-    fn max_bitcoin_for_price(&self, ask_price: bitcoin::Amount) -> Option<bitcoin::Amount> {
+    fn max_bitcoin_for_price(&self, ask_price: Decimal) -> Option<bitcoin::Amount> {
         let pico_minus_fee = self.max_conservative_giveable();
 
         if pico_minus_fee.as_pico() == 0 {
             return Some(bitcoin::Amount::ZERO);
         }
 
-        // safely convert the BTC/XMR rate to sat/pico
-        let ask_sats = Decimal::from(ask_price.to_sat());
+        // ask_price is already satoshis per XMR/XKR (Decimal, possibly sub-sat).
+        let ask_sats = ask_price;
         let pico_per_xmr = Decimal::from(PICONERO_OFFSET);
         let ask_sats_per_pico = ask_sats / pico_per_xmr;
 

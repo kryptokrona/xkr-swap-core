@@ -16,8 +16,9 @@
 
 use crate::cli::api::Context;
 use crate::cli::api::request::{
-    BalanceArgs, BuyXmrDirectArgs, GetBitcoinAddressArgs, GetBitcoinTransactionsArgs,
-    GetHistoryArgs, GetSellersArgs, GetSwapInfosAllArgs, Request, ResumeSwapArgs, WithdrawBtcArgs,
+    BalanceArgs, BuyXmrDirectArgs, CancelAndRefundArgs, GetBitcoinAddressArgs,
+    GetBitcoinTransactionsArgs, GetHistoryArgs, GetSellersArgs, GetSwapInfosAllArgs, Request,
+    ResumeSwapArgs, SuspendCurrentSwapArgs, WithdrawBtcArgs,
 };
 use anyhow::Result;
 use jsonrpsee::RpcModule;
@@ -59,6 +60,11 @@ struct ResumeParams {
     /// address here re-points the peer before resuming, so the swap can reconnect.
     #[serde(default)]
     seller_multiaddr: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CancelParams {
+    swap_id: String,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +220,31 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
             }
         }
         let r = ResumeSwapArgs { swap_id }
+            .request(ctx)
+            .await
+            .map_err(rpc_err)?;
+        serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    // Suspend the currently-running swap, releasing the engine's global swap lock.
+    // A single stuck/wedged swap otherwise holds that lock and blocks every new
+    // swap (acquire_swap_lock bails). The swap stays in the DB (completed=false)
+    // and can be resumed or cancel-refunded afterwards; nothing on-chain changes.
+    module.register_async_method("suspend_current_swap", |_params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let r = SuspendCurrentSwapArgs.request(ctx).await.map_err(rpc_err)?;
+        serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    // Cancel + refund a swap by id: publishes the cancel tx (once the cancel
+    // timelock allows) and then the refund, returning the taker's locked BTC.
+    // Needs the swap lock, so if the target swap is currently running the caller
+    // must `suspend_current_swap` first (otherwise acquire_swap_lock bails).
+    module.register_async_method("cancel_and_refund", |params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let p: CancelParams = params.parse().map_err(rpc_err)?;
+        let swap_id = Uuid::from_str(&p.swap_id).map_err(rpc_err)?;
+        let r = CancelAndRefundArgs { swap_id }
             .request(ctx)
             .await
             .map_err(rpc_err)?;

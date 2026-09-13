@@ -1238,36 +1238,56 @@ pub async fn buy_xmr_direct(
         .tasks
         .clone()
         .spawn(async move {
-            let run = async {
-                let swap_handle = event_loop_handle
-                    .swap_handle(seller_peer_id, swap_id)
-                    .await?;
-                let swap = Swap::new(
-                    db.clone(),
-                    swap_id,
-                    bitcoin_wallet.clone(),
-                    env_config,
-                    swap_handle,
-                    monero_receive_pool.clone(),
-                    xkr_receive_address,
-                    bitcoin_change_address,
-                    tx_lock_amount,
-                    tx_lock_fee,
-                );
-                bob::run(swap).await
-            }
-            .await;
-
-            match run {
-                Ok(state) => {
-                    tracing::info!(%swap_id, state = %state, "Direct swap completed");
+            // Race the swap against a force-suspension signal so the GUI can CANCEL
+            // a swap that's stuck getting off the ground (e.g. the p2p beam never
+            // connects during setup) and immediately release the swap lock to retry.
+            // Without this the lock is held for the full setup timeout (~120s),
+            // blocking any retry -- which is exactly the "swap lock still active"
+            // dead end. `biased` polls the cancel arm first.
+            tokio::select! {
+                biased;
+                _ = swap_lock_ctx.swap_lock.listen_for_swap_force_suspension() => {
+                    tracing::info!(%swap_id, "Direct swap cancelled — releasing swap lock");
                     swap_lock_ctx.clear_swap_error(&swap_id);
+                    swap_lock_ctx
+                        .swap_lock
+                        .release_swap_lock()
+                        .await
+                        .expect("Cancelled swap but failed to release swap lock");
+                    return Ok::<_, anyhow::Error>(());
                 }
-                Err(error) => {
-                    tracing::error!(%swap_id, "Direct swap failed: {:#}", error);
-                    // Record the reason (terminal) so the GUI can fetch it via the
-                    // `swap_error` RPC and show why the swap didn't get off the ground.
-                    swap_lock_ctx.record_swap_error(swap_id, format!("{error:#}"), true);
+
+                run = async {
+                    let swap_handle = event_loop_handle
+                        .swap_handle(seller_peer_id, swap_id)
+                        .await?;
+                    let swap = Swap::new(
+                        db.clone(),
+                        swap_id,
+                        bitcoin_wallet.clone(),
+                        env_config,
+                        swap_handle,
+                        monero_receive_pool.clone(),
+                        xkr_receive_address,
+                        bitcoin_change_address,
+                        tx_lock_amount,
+                        tx_lock_fee,
+                    );
+                    bob::run(swap).await
+                } => {
+                    match run {
+                        Ok(state) => {
+                            tracing::info!(%swap_id, state = %state, "Direct swap completed");
+                            swap_lock_ctx.clear_swap_error(&swap_id);
+                        }
+                        Err(error) => {
+                            tracing::error!(%swap_id, "Direct swap failed: {:#}", error);
+                            // Record the reason (terminal) so the GUI can fetch it via
+                            // the `swap_error` RPC and show why the swap didn't get off
+                            // the ground.
+                            swap_lock_ctx.record_swap_error(swap_id, format!("{error:#}"), true);
+                        }
+                    }
                 }
             }
 

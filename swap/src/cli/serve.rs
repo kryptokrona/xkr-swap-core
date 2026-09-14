@@ -82,6 +82,12 @@ struct SwapErrorParams {
     swap_id: String,
 }
 
+#[derive(Deserialize)]
+struct EstimateLockFeeParams {
+    /// The BTC amount (satoshis) the taker intends to lock.
+    btc_amount_sat: u64,
+}
+
 /// Serve the taker JSON-RPC API on `host:port` from an already-built `Context`
 /// (its p2p event loop is already running). Blocks until the server stops.
 /// Keep the Bitcoin wallet balance fresh in the background so the frequently
@@ -126,6 +132,21 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         let ctx: Arc<Context> = (*ctx).clone();
         let r = GetSwapInfosAllArgs.request(ctx).await.map_err(rpc_err)?;
         serde_json::to_value(r).map_err(rpc_err)
+    })?;
+
+    // Estimate the on-chain fee for the BTC lock transaction of a given amount,
+    // so the GUI can show it BEFORE the user confirms the swap (the same figure
+    // buy_xmr_direct computes internally). Returns { fee_sat }.
+    module.register_async_method("estimate_lock_fee", |params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let p: EstimateLockFeeParams = params.parse().map_err(rpc_err)?;
+        let wallet = ctx.try_get_bitcoin_wallet().await.map_err(rpc_err)?;
+        let amount = bitcoin::Amount::from_sat(p.btc_amount_sat);
+        let fee = wallet
+            .estimate_fee(swap_core::bitcoin::TxLock::weight(), Some(amount))
+            .await
+            .map_err(rpc_err)?;
+        serde_json::to_value(serde_json::json!({ "fee_sat": fee.to_sat() })).map_err(rpc_err)
     })?;
 
     // The last recorded failure reason for a swap, if any. A swap that fails

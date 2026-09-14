@@ -103,20 +103,26 @@ impl Behaviour {
     pub fn add_peer_with_address(&mut self, peer: PeerId, address: Multiaddr) -> bool {
         let newly_added = self.peers.insert(peer);
 
-        // If the peer is newly added, schedule a dial immediately
-        if newly_added {
-            self.schedule_redial(&peer, Duration::ZERO, false);
-
-            tracing::trace!(
-                ?address,
-                "Started tracking peer and added a specific address"
-            );
-        }
-
         self.to_swarm.push_back(ToSwarm::NewExternalAddrOfPeer {
             peer_id: peer,
             address: address.clone(),
         });
+
+        // A caller adds a SPECIFIC address (e.g. our freshly-opened local bridge
+        // for a swap) precisely because it's a new, reachable path -- so try it
+        // NOW. Reset the peer's backoff (it may have grown to the 30s cap from
+        // earlier failed dials to the peer's stale loopback/onion addresses) and
+        // schedule an immediate dial (replace=true overrides any pending backoff).
+        // Without this, an already-tracked peer's swap would wait out that backoff
+        // before the bridge is ever dialed -- long past the GUI's patience.
+        self.backoff.reset(&peer);
+        self.schedule_redial(&peer, Duration::ZERO, true);
+
+        tracing::trace!(
+            ?address,
+            newly_added,
+            "Added a specific address; reset backoff and scheduled an immediate dial"
+        );
 
         newly_added
     }

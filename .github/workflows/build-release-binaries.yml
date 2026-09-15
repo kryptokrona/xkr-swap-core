@@ -11,6 +11,11 @@ env:
   DOCKER_ASB_IMAGE_NAME: ghcr.io/eigenwallet/asb
   DOCKER_ASB_CONTROLLER_IMAGE_NAME: ghcr.io/eigenwallet/asb-controller
 
+# Default token needs write to create the release and upload assets. The Docker
+# job narrows this to its own {contents: read, packages: write} block.
+permissions:
+  contents: write
+
 concurrency:
   group: build-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
@@ -46,13 +51,11 @@ jobs:
             echo "Tag '$tag' -> full release"
           fi
 
-      # Idempotent: a sibling workflow (create-release / preview / dev-test) may
-      # have already created this release via the BOTTY PAT, whose tag push is
-      # what triggered us. View-or-create so we never fail on an existing release,
-      # and reconcile its pre-release flag with what the tag implies.
+      # Idempotent view-or-create so a re-run (or a release created by hand for
+      # this tag) never fails, and the pre-release flag is reconciled to the tag.
       - name: Create or update the release
         env:
-          GH_TOKEN: ${{ secrets.BOTTY_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
@@ -261,7 +264,7 @@ jobs:
       - name: Upload archive + signature to the release
         if: startsWith(github.ref, 'refs/tags/')
         env:
-          GH_TOKEN: ${{ secrets.BOTTY_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |

@@ -63,9 +63,6 @@ pub struct BuyXmrArgs {
     #[typeshare(serialized_as = "Option<string>")]
     pub bitcoin_change_address: Option<bitcoin::Address<NetworkUnchecked>>,
     pub monero_receive_pool: MoneroAddressPool,
-    /// The XKR address to receive the swapped funds at (the redeem sweep
-    /// destination). Supplied per-swap; not persisted, so a resumed swap falls
-    /// back to the `XKR_RECEIVE_ADDRESS` env var.
     pub xkr_receive_address: String,
 }
 
@@ -200,9 +197,7 @@ pub struct GetSwapInfoResponse {
     pub cancel_timelock: CancelTimelock,
     pub punish_timelock: PunishTimelock,
     pub monero_receive_pool: MoneroAddressPool,
-    /// XKR (Monero) lock tx hash, once the maker has locked XKR. None before then.
     pub xmr_lock_txid: Option<String>,
-    /// XKR (Monero) redeem sweep tx hash, once we've swept the XKR to our wallet.
     pub xmr_redeem_txid: Option<String>,
 }
 
@@ -284,7 +279,6 @@ impl Request for GetBitcoinAddressArgs {
     }
 }
 
-// GetSellers -- makers discovered via rendezvous, with their live quotes.
 pub struct GetSellersArgs;
 
 impl Request for GetSellersArgs {
@@ -297,7 +291,6 @@ impl Request for GetSellersArgs {
     }
 }
 
-// GetBitcoinTransactions -- the on-chain Bitcoin wallet's tx history (for the GUI).
 pub struct GetBitcoinTransactionsArgs;
 
 impl Request for GetBitcoinTransactionsArgs {
@@ -863,7 +856,6 @@ pub async fn get_swap_info(
         })
         .with_context(|| "Did not find SwapSetupCompleted state for swap")?;
 
-    // XKR lock txid: from the first state that carries the lock transfer proof.
     let xmr_lock_txid = states.iter().find_map(|state| match state {
         State::Bob(BobState::XmrLockTransactionCandidate { lock_transfer_proof, .. })
         | State::Bob(BobState::XmrLockTransactionSeen { lock_transfer_proof, .. }) => {
@@ -871,7 +863,6 @@ pub async fn get_swap_info(
         }
         _ => None,
     });
-    // XKR redeem sweep txid: kept by the redeem states (the final XmrRedeemed drops it).
     let xmr_redeem_txid = states.iter().find_map(|state| match state {
         State::Bob(BobState::XmrRedeemConstructed { xmr_redeem_txid, .. })
         | State::Bob(BobState::XmrRedeemPublished { xmr_redeem_txid, .. }) => {
@@ -1125,29 +1116,14 @@ pub async fn buy_xmr(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// BuyXmrDirect: a headless swap against an explicitly-provided maker. Unlike
-// `buy_xmr`, this skips the interactive maker-selection/approval flow (which is
-// Tauri-event driven), so it can be driven over JSON-RPC by the GUI serve
-// daemon, which knows the maker (a local ASB) up front.
-// ---------------------------------------------------------------------------
-
-/// A valid mainnet Monero address, used only to satisfy the vestigial
-/// `monero_receive_pool` argument -- the XKR port routes payout to
-/// `xkr_receive_address`, so the pool is never used on the happy path.
 const DUMMY_XMR_ADDRESS: &str = "4B33mFPMq6mKi7Eiyd5XuyKRVMGVZz1Rqb9ZTyGApXW5d1aT7UBDZ89ewmnWFkzJ5wPd2SFbn313vCT8a4E2Qf4KQH4pNey";
 
 #[derive(Debug)]
 pub struct BuyXmrDirectArgs {
-    /// The maker's libp2p multiaddress (e.g. the local ASB).
     pub seller_multiaddr: Multiaddr,
-    /// The maker's libp2p peer id.
     pub seller_peer_id: PeerId,
-    /// The amount of BTC to lock (the swap amount).
     pub btc_amount: bitcoin::Amount,
-    /// The XKR address to receive the swapped funds at.
     pub xkr_receive_address: String,
-    /// Optional BTC change address; defaults to an internal wallet address.
     pub bitcoin_change_address: Option<bitcoin::Address<NetworkUnchecked>>,
 }
 
@@ -1166,9 +1142,6 @@ impl Request for BuyXmrDirectArgs {
     }
 }
 
-/// Runs a swap against an explicitly-provided maker. Spawns the swap in the
-/// background and returns immediately with the swap id; progress is observed via
-/// `get_swap_infos_all` / `get_swap_info`.
 pub async fn buy_xmr_direct(
     args: BuyXmrDirectArgs,
     swap_id: Uuid,
@@ -1200,10 +1173,6 @@ pub async fn buy_xmr_direct(
         .estimate_fee(swap_core::bitcoin::TxLock::weight(), Some(tx_lock_amount))
         .await?;
 
-    // Pre-flight: make sure the wallet can actually afford the lock (swap amount
-    // + on-chain fee) BEFORE we create the swap, so the caller gets an immediate,
-    // real error instead of a swap that silently fails during setup and never
-    // shows up in swap_infos.
     let available = bitcoin_wallet
         .balance()
         .await
@@ -1238,12 +1207,6 @@ pub async fn buy_xmr_direct(
         .tasks
         .clone()
         .spawn(async move {
-            // Race the swap against a force-suspension signal so the GUI can CANCEL
-            // a swap that's stuck getting off the ground (e.g. the p2p beam never
-            // connects during setup) and immediately release the swap lock to retry.
-            // Without this the lock is held for the full setup timeout (~120s),
-            // blocking any retry -- which is exactly the "swap lock still active"
-            // dead end. `biased` polls the cancel arm first.
             tokio::select! {
                 biased;
                 _ = swap_lock_ctx.swap_lock.listen_for_swap_force_suspension() => {
@@ -1282,9 +1245,6 @@ pub async fn buy_xmr_direct(
                         }
                         Err(error) => {
                             tracing::error!(%swap_id, "Direct swap failed: {:#}", error);
-                            // Record the reason (terminal) so the GUI can fetch it via
-                            // the `swap_error` RPC and show why the swap didn't get off
-                            // the ground.
                             swap_lock_ctx.record_swap_error(swap_id, format!("{error:#}"), true);
                         }
                     }
@@ -1990,7 +1950,6 @@ pub async fn change_monero_node(
     args: ChangeMoneroNodeArgs,
     context: Arc<Context>,
 ) -> Result<ChangeMoneroNodeResponse> {
-    // XKR port: there is no Monero node to switch to.
     let _ = (args, context);
     Ok(ChangeMoneroNodeResponse { success: true })
 }

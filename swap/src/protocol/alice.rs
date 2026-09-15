@@ -1,5 +1,3 @@
-//! Run a BTC/XKR swap in the role of Alice.
-//! Alice holds XKR and wishes to receive BTC.
 use crate::asb;
 use crate::protocol::Database;
 pub use crate::protocol::alice::swap::*;

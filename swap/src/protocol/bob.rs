@@ -27,9 +27,6 @@ pub struct Swap {
     pub env_config: env::Config,
     pub id: Uuid,
     pub monero_receive_pool: MoneroAddressPool,
-    /// Bob's XKR receive address — the redeem sweep destination. Supplied per-swap
-    /// via `BuyXmrArgs` for new swaps (`Swap::new`); not persisted, so a resumed
-    /// swap (`Swap::from_db`) falls back to the `XKR_RECEIVE_ADDRESS` env var.
     pub xkr_receive_address: String,
     pub event_emitter: Option<TauriHandle>,
 }

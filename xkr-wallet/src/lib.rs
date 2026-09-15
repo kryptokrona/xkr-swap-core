@@ -1,20 +1,6 @@
-//! XKR (Kryptokrona) wallet client for BTC<->XKR atomic swaps.
-//!
-//! This is the Kryptokrona side of the swap. The swap engine owns the protocol,
-//! the Bitcoin side, and the cross-curve DLEQ / adaptor-signature crypto; it
-//! computes the shared 2-of-2 ed25519 keys (spend pubkey `B_A+B_B`, view secret
-//! `v_A+v_B`) and then calls the methods below. Everything that touches the
-//! Kryptokrona chain lives behind this boundary, in a small JSON-RPC service
-//! (backed by kryptokrona-wallet-backend-js) that ships inside the wallet app.
-//!
-//! Keeping the XKR wallet behind an RPC boundary means the engine needs no
-//! Kryptokrona consensus code: the shared output is spent with an ordinary
-//! transaction once both spend shares are known.
-
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
-/// A client for the XKR wallet JSON-RPC service.
 #[derive(Clone)]
 pub struct XkrWalletClient {
     base_url: String,
@@ -22,7 +8,6 @@ pub struct XkrWalletClient {
 }
 
 impl XkrWalletClient {
-    /// Create a client targeting the service base URL, e.g. `http://127.0.0.1:40000`.
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -30,7 +15,6 @@ impl XkrWalletClient {
         }
     }
 
-    /// Issue a single JSON-RPC 2.0 call and return its `result`.
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let response = self
@@ -53,7 +37,6 @@ impl XkrWalletClient {
             .ok_or_else(|| anyhow!("xkr-wallet-rpc returned no result for {method}"))
     }
 
-    /// Health check. Returns the service's `pong`.
     pub async fn ping(&self) -> Result<String> {
         Ok(self
             .call("ping", json!({}))
@@ -63,7 +46,6 @@ impl XkrWalletClient {
             .to_string())
     }
 
-    /// Encode the shared 2-of-2 keys as a fundable Kryptokrona address.
     pub async fn encode_address(
         &self,
         spend_public_key: &str,
@@ -82,8 +64,6 @@ impl XkrWalletClient {
             .ok_or_else(|| anyhow!("encodeAddress returned no address"))
     }
 
-    /// Block until the locked deposit lands at `address` (watched view-only).
-    /// Returns the hash of the detected lock deposit.
     pub async fn watch_for_lock(
         &self,
         address: &str,
@@ -107,8 +87,6 @@ impl XkrWalletClient {
             .ok_or_else(|| anyhow!("watchForLock detected the deposit but returned no txHash"))
     }
 
-    /// Reconstruct the shared wallet from the combined secrets and sweep to `dest`.
-    /// Returns the sweep transaction hash.
     pub async fn sweep(
         &self,
         spend_secret: &str,
@@ -129,9 +107,6 @@ impl XkrWalletClient {
             .ok_or_else(|| anyhow!("sweep returned no txHash"))
     }
 
-    /// Poll until a transaction spending from the shared address (redeem/refund)
-    /// reaches `confirmations` depth. Keyed by `tx_hash`, so it is safe to re-call
-    /// after a restart without re-broadcasting. Returns the observed depth.
     pub async fn confirm_tx(
         &self,
         spend_secret: &str,
@@ -158,8 +133,6 @@ impl XkrWalletClient {
             .ok_or_else(|| anyhow!("confirmTx returned no confirmations"))
     }
 
-    /// Alice's side: send `amount` from the sender's own wallet to `dest` (the
-    /// shared address — the XKR lock). Returns the broadcast tx hash.
     pub async fn lock_send(
         &self,
         sender_spend_secret: &str,
@@ -185,9 +158,6 @@ impl XkrWalletClient {
             .ok_or_else(|| anyhow!("lockSend returned no txHash"))
     }
 
-    /// Unlocked (spendable) and locked balance of the wallet reconstructed from
-    /// the given secrets, in XKR atomic units. Used by the maker to bound quotes
-    /// and gate swap setup against its real XKR funding.
     pub async fn balance(
         &self,
         spend_secret: &str,

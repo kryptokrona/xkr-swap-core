@@ -44,13 +44,6 @@ impl Seed {
         Ok(Seed(*monero_seed.entropy()))
     }
 
-    /// Deterministically derive the engine seed from the XKR wallet's 32-byte
-    /// private spend key. This makes the whole engine wallet (its Bitcoin funds
-    /// and libp2p identity) recoverable from the XKR wallet alone: restore the XKR
-    /// wallet and this seed -- and everything derived from it -- comes back.
-    ///
-    /// The key is hashed with a domain tag rather than used verbatim as the root
-    /// seed, so the engine seed is not itself the XKR spend key.
     pub fn from_xkr_spend_key(spend_key: [u8; 32]) -> Self {
         let mut engine = sha256::HashEngine::default();
         engine.input(b"XKR_SWAP_ENGINE_SEED");
@@ -59,11 +52,6 @@ impl Seed {
         Seed(hash.to_byte_array())
     }
 
-    /// A short, stable, non-secret id for this seed. Used to give each seed (i.e.
-    /// each opened XKR wallet) its OWN wallet-DB directory, so switching wallets
-    /// never makes BDK try to open a database whose descriptor was written by a
-    /// different wallet's seed (which fails with a descriptor mismatch). It is a
-    /// domain-separated hash of the seed, so it reveals nothing about the seed.
     pub fn wallet_id(&self) -> String {
         hex::encode(&self.derive(b"WALLET_DB_ID").bytes()[..8])
     }
@@ -85,7 +73,6 @@ impl Seed {
     }
 
     /// Derive a new seed using the given scope.
-    ///
     /// This function is purposely kept private because it is only a helper
     /// function for deriving specific secret material from the root seed
     /// like the libp2p identity or the seed for the Bitcoin wallet.
@@ -156,7 +143,6 @@ impl bitcoin_wallet::BitcoinWalletSeed for Seed {
     }
 
     /// Same as `derive_extended_private_key`, but using the legacy BDK API.
-    ///
     /// This is only used for the migration path from the old wallet format to the new one.
     fn derive_extended_private_key_legacy(
         &self,

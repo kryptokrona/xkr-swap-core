@@ -1,17 +1,3 @@
-//! CLI + long-running entry point for the XKR wallet client.
-//!
-//! The wallet app (Aesir/yggdrasil-wallet) spawns this binary as a child
-//! process in `serve` mode; it connects to the local XKR wallet JSON-RPC
-//! service and stays alive as the swap engine's XKR-side worker. The one-shot
-//! subcommands are for testing the boundary by hand.
-//!
-//! Usage:
-//!   xkr-wallet [--rpc-url URL] serve
-//!   xkr-wallet [--rpc-url URL] ping
-//!   xkr-wallet [--rpc-url URL] encode-address <spendPub> <viewPub>
-//!   xkr-wallet [--rpc-url URL] watch-for-lock <address> <viewSecret> <amount> [timeoutMs]
-//!   xkr-wallet [--rpc-url URL] sweep <spendSecret> <viewSecret> <dest> [fee]
-
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -81,9 +67,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Long-running mode: wait for the XKR wallet RPC service to come up, announce
-/// readiness on stdout (the wallet app watches for this), then health-ping
-/// until the process is killed.
 async fn serve(client: &XkrWalletClient, rpc_url: &str) {
     loop {
         match client.ping().await {

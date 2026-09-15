@@ -533,9 +533,6 @@ impl bitcoin_wallet::BitcoinTauriBackgroundTask
     }
 }
 
-// XKR port: the Monero wallet event bridge (monero_wallet::MoneroTauriHandle)
-// was removed along with the Monero wallet.
-
 impl Display for ApprovalRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.request {
@@ -985,7 +982,6 @@ pub enum TauriContextStatusEvent {
     Available,
     Failed,
 }
-
 
 #[derive(Serialize, Clone)]
 #[typeshare]

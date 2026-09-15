@@ -1,37 +1,3 @@
-//! Level-3 end-to-end driver: a full two-party BTC<->XKR atomic swap, with both
-//! parties (Alice/maker and Bob/taker) running in-process against real infra.
-//!
-//! This is the one thing the Level-1 (JS service) and Level-2 (adapter) tests do
-//! not prove: the whole cross-chain choreography end to end —
-//!
-//!   Bob locks BTC  ->  Alice sees it confirmed, locks XKR  ->  Bob detects the
-//!   XKR lock and sends his encrypted signature  ->  Alice redeems the BTC,
-//!   revealing the adaptor  ->  Bob extracts the key and sweeps the XKR.
-//!
-//! The two run on connected in-process libp2p swarms (Alice listens, Bob dials),
-//! exactly as `swap-asb` and the `swap` CLI wire them in production. Everything
-//! external is orchestrated by the harness that invokes this
-//! (`scripts/testnet/swap-two-party-test.sh`):
-//!   * a bitcoind regtest + electrs for the BTC side (this driver funds Bob and
-//!     the harness mines BTC blocks in the background to drive confirmations),
-//!   * a peered XKR testnet mesh + the `xkr-wallet-rpc.cjs` service for the XKR
-//!     side (the harness funds the ASB's XKR wallet and mines XKR blocks).
-//!
-//! The engine reaches the XKR side entirely through env (`XKR_WALLET_RPC_URL`,
-//! `XKR_ASB_SPEND_SECRET`, `XKR_ASB_VIEW_SECRET`) inside the protocol code, so
-//! this driver never touches `XkrWallet` directly — it only stands up the two
-//! parties and asserts they both reach their happy-path terminal states.
-//!
-//! Config (all via env):
-//!   ELECTRUM_RPC_URL     electrs, e.g. tcp://@localhost:50001
-//!   BITCOIND_RPC_URL     bitcoind wallet RPC, e.g.
-//!                        http://user:pass@127.0.0.1:18443/wallet/xkr
-//!   XKR_WALLET_RPC_URL   XKR wallet RPC service (read by the engine)
-//!   XKR_ASB_SPEND_SECRET / XKR_ASB_VIEW_SECRET   the ASB's XKR keys (engine)
-//!   XKR_RECEIVE_ADDRESS  Bob's XKR payout address (the redeem sweep destination)
-//!   BTC_AMOUNT_SAT       swap size in satoshis (default 1_000_000)
-//!   SWAP_TIMEOUT_SECS    overall wall-clock budget (default 900)
-
 use anyhow::{Context, Result, bail};
 use bitcoin::Amount;
 use bitcoin_wallet::{PersisterConfig, Wallet, WalletBuilder};
@@ -54,18 +20,12 @@ use swap_env::env::{Config, GetConfig, Regtest};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-/// A valid mainnet Monero address literal, used only to satisfy `bob::Swap::new`'s
-/// vestigial `monero_receive_pool` argument. The XKR port routes Bob's payout to
-/// `xkr_receive_address`, so this pool is never used on the happy path — it just
-/// has to construct.
 const DUMMY_XMR_ADDRESS: &str = "4B33mFPMq6mKi7Eiyd5XuyKRVMGVZz1Rqb9ZTyGApXW5d1aT7UBDZ89ewmnWFkzJ5wPd2SFbn313vCT8a4E2Qf4KQH4pNey";
 
 fn env(key: &str) -> Result<String> {
     std::env::var(key).with_context(|| format!("missing env var {key}"))
 }
 
-/// Predicate for `bob::run_until` in punish mode: stop as soon as Bob has seen
-/// Alice's XKR lock (before he signs), simulating Bob going offline.
 fn bob_reached_xmr_locked(state: &bob::BobState) -> bool {
     matches!(state, bob::BobState::XmrLocked(_))
 }
@@ -74,8 +34,6 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Minimal bitcoind JSON-RPC call. `BITCOIND_RPC_URL` may embed `user:pass@`
-/// userinfo (we lift it into HTTP basic auth) and a `/wallet/<name>` path.
 async fn btc_rpc(rpc_url: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let parsed = url::Url::parse(rpc_url).context("parse BITCOIND_RPC_URL")?;
     let user = parsed.username().to_string();
@@ -108,8 +66,6 @@ async fn btc_rpc(rpc_url: &str, method: &str, params: serde_json::Value) -> Resu
     Ok(resp["result"].clone())
 }
 
-/// Build a BDK bitcoin wallet backed by the regtest electrs, mirroring how the
-/// production CLI/ASB build theirs (in-memory sqlite, 1-conf finality).
 async fn build_btc_wallet(
     seed: &Seed,
     electrum_url: &str,
@@ -144,7 +100,6 @@ async fn open_db(path: &Path) -> Result<Arc<SqliteDatabase>> {
     ))
 }
 
-/// Poll-sync a wallet until it sees at least `want`.
 async fn wait_for_btc_balance(wallet: &Wallet, want: Amount) -> Result<()> {
     for attempt in 1..=60u32 {
         wallet.sync().await.context("sync btc wallet")?;
@@ -172,21 +127,12 @@ async fn main() -> Result<()> {
     let env_config: Config = Regtest::get_config();
     let btc_network = env_config.bitcoin_network;
 
-    // electrum-client only strips the scheme, so no userinfo "@" in the URL:
-    // `tcp://host:port` (a leading "@" ends up in the host and breaks DNS).
     let electrum_url = env_or("ELECTRUM_RPC_URL", "tcp://127.0.0.1:50001");
     let bitcoind_rpc = env("BITCOIND_RPC_URL")?;
     let btc_amount = Amount::from_sat(env_or("BTC_AMOUNT_SAT", "1000000").parse().context("BTC_AMOUNT_SAT")?);
     let bob_xkr_receive = env("XKR_RECEIVE_ADDRESS")?;
     let timeout_secs: u64 = env_or("SWAP_TIMEOUT_SECS", "900").parse().context("SWAP_TIMEOUT_SECS")?;
 
-    // SWAP_MODE selects one of three scenarios:
-    //   happy  - full redeem-both-sides swap (Bob XmrRedeemed, Alice BtcRedeemed).
-    //   refund - Alice never locks XKR, so after the cancel timelock Bob reclaims
-    //            his BTC (Bob BtcRefunded).
-    //   punish - Alice locks XKR, but Bob goes offline after seeing the lock
-    //            (never signs, never refunds); after the cancel + punish timelocks
-    //            Alice claims Bob's BTC (Alice BtcPunished).
     let swap_mode = env_or("SWAP_MODE", "happy");
     let refund_mode = swap_mode == "refund";
     let punish_mode = swap_mode == "punish";
@@ -204,7 +150,6 @@ async fn main() -> Result<()> {
     let alice_btc = build_btc_wallet(&alice_seed, &electrum_url, btc_network).await?;
     let bob_btc = build_btc_wallet(&bob_seed, &electrum_url, btc_network).await?;
 
-    // ---- Fund Bob with BTC from the regtest bitcoind, then confirm it. ----
     let bob_deposit = bob_btc.new_address().await.context("bob deposit address")?;
     let fund_sat = btc_amount.to_sat().saturating_mul(3);
     let fund_btc = Amount::from_sat(fund_sat).to_btc();
@@ -215,7 +160,6 @@ async fn main() -> Result<()> {
     btc_rpc(&bitcoind_rpc, "generatetoaddress", serde_json::json!([3, mine_to])).await?;
     wait_for_btc_balance(&bob_btc, btc_amount).await?;
 
-    // ---- Alice (maker): asb swarm + event loop, listening. ----
     let min_buy = Amount::from_sat(0);
     let max_buy = Amount::from_sat(u64::MAX);
 
@@ -244,7 +188,6 @@ async fn main() -> Result<()> {
     )
     .context("build alice swarm")?;
 
-    // Pick a free port and listen on it, so Bob has a concrete address to dial.
     let alice_port = {
         let l = std::net::TcpListener::bind(("127.0.0.1", 0)).context("bind free port")?;
         l.local_addr().context("local_addr")?.port()
@@ -276,10 +219,6 @@ async fn main() -> Result<()> {
     println!("[l3] alice listening on {alice_addr}/p2p/{alice_peer_id}");
     tokio::spawn(alice_event_loop.run());
 
-    // Alice creates a Swap when Bob initiates setup (via the event loop above).
-    // Happy path: run it to completion (locks XKR, redeems BTC). Refund path:
-    // receive it but never run it, so Alice completes setup — letting Bob lock
-    // BTC — yet never locks XKR, forcing Bob down the cancel-timelock refund path.
     let alice_join = tokio::spawn(async move {
         let swap = alice_swap_rx
             .recv()
@@ -293,7 +232,6 @@ async fn main() -> Result<()> {
         alice::run(swap, FixedRate::default()).await
     });
 
-    // ---- Bob (taker): cli swarm + event loop, dialing Alice. ----
     let bob_db_path = scratch.join("bob.sqlite");
     let bob_db = open_db(&bob_db_path).await?;
     let bob_identity = bob_seed.derive_libp2p_identity();
@@ -342,15 +280,12 @@ async fn main() -> Result<()> {
     );
 
     println!("[l3] starting swap {swap_id} for {btc_amount}");
-    // Punish path: Bob runs only until he has seen Alice's XKR lock, then stops
-    // (goes offline) without signing or refunding -- leaving Alice to punish.
     let bob_join = if punish_mode {
         tokio::spawn(bob::run_until(bob_swap, bob_reached_xmr_locked))
     } else {
         tokio::spawn(bob::run(bob_swap))
     };
 
-    // ---- Wait for both parties to finish, within the overall budget. ----
     let budget = Duration::from_secs(timeout_secs);
 
     let bob_state = match timeout(budget, bob_join).await {
@@ -360,8 +295,6 @@ async fn main() -> Result<()> {
     println!("[l3] bob terminal state: {bob_state:?}");
 
     if refund_mode {
-        // Alice is intentionally idle; stop her task, then assert Bob reclaimed
-        // his BTC. Any of the refund terminals counts as a safe recovery.
         alice_join.abort();
         match bob_state {
             bob::BobState::BtcRefunded(_)
@@ -375,9 +308,6 @@ async fn main() -> Result<()> {
     }
 
     if punish_mode {
-        // Bob stopped at XmrLocked and went offline (no signature, no refund).
-        // Alice can't redeem, so after the cancel + punish timelocks she claims
-        // his BTC. Bob finished early; now wait out Alice's punish path.
         match bob_state {
             bob::BobState::XmrLocked(_) => {}
             other => bail!("bob was expected to stop at XmrLocked; got {other:?}"),
@@ -411,7 +341,6 @@ async fn main() -> Result<()> {
         other => bail!("alice did not reach BtcRedeemed (happy path); ended in {other:?}"),
     }
 
-    // Best-effort cleanup of scratch state.
     let _ = tokio::fs::remove_dir_all(&scratch).await;
 
     println!("[l3] TWO-PARTY BTC<->XKR SWAP PASSED");

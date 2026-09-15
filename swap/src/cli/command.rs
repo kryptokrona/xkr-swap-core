@@ -19,10 +19,6 @@ use uuid::Uuid;
 use super::api::ContextBuilder;
 use super::api::request::GetLogsArgs;
 
-/// Parse XKR rendezvous points from the `XKR_SWAP_RENDEZVOUS` env var: a
-/// comma-separated list of multiaddrs, each including a `/p2p/<peer-id>` part
-/// (e.g. `/ip4/1.2.3.4/tcp/8888/p2p/12D3Koo…`). Unset/empty => no rendezvous
-/// discovery (the taker then only reaches makers it already knows).
 fn rendezvous_points_from_env() -> Vec<(PeerId, Vec<Multiaddr>)> {
     let raw = match std::env::var("XKR_SWAP_RENDEZVOUS") {
         Ok(s) if !s.trim().is_empty() => s,

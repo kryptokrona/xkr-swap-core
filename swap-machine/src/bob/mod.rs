@@ -24,7 +24,6 @@ use swap_core::monero::{ScalarExt, TransferProofMaybeWithTxKey};
 use swap_serde::bitcoin::address_serde;
 use uuid::Uuid;
 
-
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum BobState {
     Started {
@@ -65,7 +64,6 @@ pub enum BobState {
     /// Bob has verified that the correct amount of Monero has been locked and fully confirmed.
     /// It is safe to transmit the encrypted signature to Alice.
     XmrLocked(State4),
-    /// The encrypted signature is ready; we deliver it to Alice over p2p.
     EncSigReadyToBeSent {
         state: State4,
         /// Whether we have already sent it over p2p.
@@ -104,20 +102,12 @@ pub enum BobState {
     BtcMercyPublished(State6),
     /// TxMercy has been confirmed. We received the burnt funds back.
     BtcMercyConfirmed(State6),
-    /// We have swept the shared XKR output to our receive address. Unlike Monero
-    /// (which builds an unpublished tx object), the XKR wallet `sweep` constructs,
-    /// signs and broadcasts atomically, so "constructed" already means broadcast;
-    /// we persist only the resulting tx hash. Kept as a distinct state so resume
-    /// after a crash can jump straight to confirming by hash without re-sweeping.
     XmrRedeemConstructed {
         state: State5,
-        /// The hash of the broadcast XKR sweep transaction.
         xmr_redeem_txid: String,
     },
-    /// The XKR redeem sweep has been broadcast but is not yet confirmed on-chain.
     XmrRedeemPublished {
         state: State5,
-        /// The hash of the broadcast XKR sweep transaction.
         xmr_redeem_txid: String,
     },
     XmrRedeemed {

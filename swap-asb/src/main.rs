@@ -96,9 +96,6 @@ pub async fn main() -> Result<()> {
     // Check in the background if there's a new version available
     tokio::spawn(async move { warn_if_outdated(env!("CARGO_PKG_VERSION")).await });
 
-    // Generate a default config non-interactively and exit. Handled before the
-    // config read below so it never triggers the interactive setup. The wallet
-    // GUI uses this to bootstrap the ASB headlessly (see asb.cjs).
     if let Command::GenerateConfig { force } = cmd {
         if config_path.exists() && !force {
             println!(
@@ -121,16 +118,8 @@ pub async fn main() -> Result<()> {
         }
     };
 
-    // Isolate ALL per-wallet state -- swap DB (`sqlite`), libp2p identity
-    // (`seed.pem`), the Bitcoin wallet, Tor state and logs all live under
-    // `data.dir` -- by pointing it at a per-wallet path when the GUI provides one.
-    // The GUI opens different XKR wallets against one shared config file; without
-    // this they'd share one swap DB and cross-contaminate each other's history.
     if let Some(dir) = std::env::var("XKR_ASB_DATA_DIR").ok().filter(|s| !s.trim().is_empty()) {
         let dir = std::path::PathBuf::from(dir);
-        // The per-wallet dir won't have been created by initial_setup (that ran for
-        // the config's default dir), so ensure it exists before we write seed.pem /
-        // the sqlite DB / the wallet into it.
         std::fs::create_dir_all(&dir).context("Failed to create XKR_ASB_DATA_DIR")?;
         config.data.dir = dir;
     }
@@ -173,9 +162,6 @@ pub async fn main() -> Result<()> {
             } else {
                 tracing::info!(%developer_tip, "Tipping to the developers is enabled. Thank you for your support!");
             }
-
-            // XKR port: the ASB no longer opens a Monero wallet. Its XKR funds live
-            // in the XKR wallet service, contacted lazily when locking XKR.
 
             // Initialize Bitcoin wallet
             let bitcoin_wallet = init_bitcoin_wallet(&config, &seed, env_config, false).await?;
@@ -233,10 +219,6 @@ pub async fn main() -> Result<()> {
 
             let price_validity_duration =
                 std::time::Duration::from_secs(config.maker.price_ticker_validity_duration_secs);
-            // XKR has no BTC exchange pair to feed from, so the maker sets a fixed
-            // sats-per-XKR ask via `XKR_ASB_PRICE_SATS`. Parsed as a Decimal so
-            // SUB-SATOSHI prices work (1 XKR is often worth a fraction of a sat).
-            // Falls back to the exchange feeds when unset.
             let kraken_rate = match std::env::var("XKR_ASB_PRICE_SATS")
                 .ok()
                 .and_then(|s| s.trim().parse::<rust_decimal::Decimal>().ok())
@@ -258,15 +240,6 @@ pub async fn main() -> Result<()> {
             };
             let namespace = XmrBtcNamespace::from_is_testnet(testnet);
 
-            // Initialize and bootstrap the Tor client ONLY when a Tor-backed
-            // feature is actually enabled. This wallet does its NAT traversal over
-            // HyperSwarm, so the onion hidden service and the wormhole are the only
-            // things that need Tor -- and both are off by default here. Bootstrapping
-            // Tor is slow (tens of seconds on a cold first run, since there's no
-            // cached directory consensus) and, crucially, it blocks startup: the
-            // control RPC below can't bind until this returns, so an unused Tor
-            // bootstrap is exactly what makes "start market-making" time out on a
-            // fresh wallet. The transport treats a `None` client as "no Tor at all".
             let tor_client = if config.tor.register_hidden_service || config.tor.wormhole_enabled {
                 let tor_client = create_tor_client(&config.data.dir).await?;
                 bootstrap_tor_client(tor_client.clone(), None).await?;
@@ -336,8 +309,6 @@ pub async fn main() -> Result<()> {
                 swarm.add_external_address(external_address.clone());
             }
 
-            // XKR port: the developer-tip and Hermes on-chain features were
-            // removed. The event loop still takes the tip ratio for quote pricing.
             let developer_tip = config.maker.developer_tip;
 
             let (metrics, _metrics_server) =
@@ -352,14 +323,6 @@ pub async fn main() -> Result<()> {
 
             let bitcoin_wallet = Arc::new(bitcoin_wallet);
 
-            // Redeem maker BTC proceeds to an explicit external address when the
-            // wallet GUI provides one (XKR_ASB_REDEEM_ADDRESS). The GUI sets it to a
-            // fresh address from the app's OWN spendable BTC wallet (the taker
-            // engine's wallet), so proceeds land there -- visible and spendable live
-            // -- instead of piling up in the ASB's separate wallet instance, which
-            // the GUI only notices after a restart's full rescan. Both wallets share
-            // the same seed/descriptor, so this is still "our" money; it just makes
-            // one wallet the single source of truth. Falls back to the config value.
             let external_redeem_address = match std::env::var("XKR_ASB_REDEEM_ADDRESS")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
@@ -519,7 +482,6 @@ pub async fn main() -> Result<()> {
             bitcoin_wallet.broadcast(signed_tx, "withdraw").await?;
         }
         Command::Balance => {
-            // XKR port: XKR funds live in the XKR wallet service, not here.
             let bitcoin_wallet = init_bitcoin_wallet(&config, &seed, env_config, true).await?;
             let bitcoin_balance = bitcoin_wallet.balance().await?;
             tracing::info!(%bitcoin_balance, "Current Bitcoin balance");
@@ -589,8 +551,6 @@ pub async fn main() -> Result<()> {
             println!("{}", wallet_export)
         }
         Command::ExportMoneroWallet => {
-            // XKR port: the ASB has no Monero wallet. XKR keys are managed by the
-            // XKR wallet service.
             println!("This build uses XKR, not Monero; there is no Monero wallet to export.");
         }
         Command::ExportMoneroLockWallet { swap_id } => {
@@ -663,12 +623,6 @@ async fn init_bitcoin_wallet(
 ) -> Result<bitcoin_wallet::Wallet> {
     tracing::debug!("Opening Bitcoin wallet");
 
-    // Derive the Bitcoin wallet from the XKR wallet key when provided, so the
-    // maker RECEIVES its BTC into the SAME wallet the taker engine uses (both
-    // derive from XKR_SWAP_SEED_KEY) -- one BTC identity across the whole app,
-    // instead of a separate ASB-only wallet the UI couldn't see. The ASB's libp2p
-    // identity keeps using its own file seed (the `seed` arg), so the peer id is
-    // untouched and never collides with the taker engine's.
     let (btc_seed, btc_data_dir) = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
         Some(hex_key) => {
             let bytes = hex::decode(hex_key.trim()).context("XKR_SWAP_SEED_KEY is not valid hex")?;
@@ -676,13 +630,6 @@ async fn init_bitcoin_wallet(
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("XKR_SWAP_SEED_KEY must be 32 bytes"))?;
             tracing::info!("Deriving ASB Bitcoin wallet from the XKR wallet key");
-            // Persist the XKR-derived wallet in its OWN dir, keyed by the seed, so
-            // it never collides with (a) the ASB's file-seed wallet, or (b) a DB
-            // written by a DIFFERENT XKR wallet. The app lets the user open any of
-            // several XKR wallets, and each one derives a different Bitcoin wallet;
-            // BDK refuses to open a DB whose descriptor differs from the loaded
-            // seed's, so without the per-seed subdir, opening a second wallet fails
-            // with "Descriptor mismatch". `wallet_id()` gives each wallet its own dir.
             let btc_seed = Seed::from_xkr_spend_key(key);
             let btc_dir = config.data.dir.join("xkr-btc").join(btc_seed.wallet_id());
             (btc_seed, btc_dir)

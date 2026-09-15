@@ -165,13 +165,8 @@ where
                         return Ok::<_, backoff::Error<anyhow::Error>>(None);
                     }
 
-                    // XKR restore height. TODO: query the XKR daemon height; 0 scans
-                    // from genesis (correct, but slower for the refund wallet).
                     let monero_wallet_restore_blockheight = 0u64;
 
-                    // The agreed lock amount and the shared 2-of-2 address to lock into.
-                    // Hermes funding + developer tip are dropped in the XKR port
-                    // (single-destination); the lock sends only the swap amount.
                     let req = state3.lock_xmr_transfer_request();
                     let amount = crate::xkr::to_xkr_atomic(req.amount);
                     let xkr = XkrWallet::from_env();
@@ -185,7 +180,6 @@ where
                         .context("Failed to derive shared XKR address")
                         .map_err(backoff::Error::transient)?;
 
-                    // Fund the lock from the ASB's own XKR wallet.
                     let (asb_spend, asb_view) = XkrWallet::asb_keys_from_env()
                         .context("ASB XKR keys not configured")
                         .map_err(backoff::Error::transient)?;
@@ -199,8 +193,6 @@ where
                     Ok::<_, backoff::Error<anyhow::Error>>(Some((
                         monero_wallet_restore_blockheight,
                         txid.clone(),
-                        // tx_key is unused on the XKR side (Bob detects the lock by
-                        // view-key scan); keep the TransferProof shape with a placeholder.
                         TransferProof::new(monero::TxHash(txid), placeholder_tx_key()),
                     )))
                 },
@@ -326,14 +318,6 @@ where
             transfer_proof,
             state3,
         } => {
-            // The XKR lock was already broadcast atomically in the construct step
-            // (gated there by the cancel-timelock check). Unlike Monero's separate
-            // publish step, there is nothing to broadcast here.
-            //
-            // NOTE: because the send is atomic, the construct-time timelock check is
-            // the only guard; a crash between broadcast and state-persist can leave
-            // XKR locked after the cancel timelock. This is inherent to the XKR
-            // wallet's build+broadcast-in-one model.
             tracing::info!(%swap_id, txid = %xmr_lock_txid, "XKR lock transaction is broadcast");
 
             AliceState::XmrLockTransactionSent {
@@ -350,9 +334,6 @@ where
             ExpiredTimelocks::None { .. } => {
                 tracing::info!("Locked XKR, waiting for confirmations");
 
-                // Confirm via the ASB's own wallet, which sees the lock as an
-                // outgoing transaction. Best-effort: the lock is already broadcast,
-                // and Bob independently detects it by view-key scanning.
                 let xkr = XkrWallet::from_env();
                 match XkrWallet::asb_keys_from_env() {
                     Ok((asb_spend, asb_view)) => {
@@ -399,7 +380,6 @@ where
                 },
                 // If we send Bob the transfer proof, but for whatever reason we do not receive an acknowledgement from him
                 // we would be stuck in this state forever until the timelock expires.
-                //
                 // By listening for the encrypted signature here we can still proceed to the next state
                 // even if Bob does not respond with an acknowledgement but sends us the encrypted signature immediately.
                 enc_sig = event_loop_handle.recv_encrypted_signature() => {
@@ -502,7 +482,6 @@ where
                     .await?;
 
                 // If the cancel timelock is expired, it it not safe to publish the Bitcoin redeem transaction anymore
-                //
                 // TODO: In practice this should be redundant because the logic above will trigger for a superset of the cases where this is true
                 if tx_lock_status.is_confirmed_with(state3.cancel_timelock) {
                     return Ok(None);
@@ -510,10 +489,8 @@ where
 
                 // We can only redeem the Bitcoin if we are fairly sure that our Bitcoin redeem transaction
                 // will be confirmed before the cancel timelock expires
-                //
                 // We make an assumption that it will take at most `env_config.bitcoin_blocks_till_confirmed_upper_bound_assumption` blocks
                 // until our transaction is included in a block. If this assumption is not satisfied, we will not publish the transaction.
-                //
                 // We will instead wait for the cancel timelock to expire and then refund.
                 if tx_lock_status.blocks_left_until(state3.cancel_timelock) < env_config.bitcoin_blocks_till_confirmed_upper_bound_assumption {
                     return Ok(None);
@@ -744,10 +721,6 @@ where
             spend_key,
             state3,
         } => {
-            // `spend_key` is the combined shared spend key (s_a + s_b, extracted
-            // from Bob's BTC refund). Combined with the shared view secret, Alice
-            // reconstructs the shared XKR wallet and sweeps the locked output back
-            // to the ASB's refund address. This reuses the sweep (redeem) path.
             let shared_spend = spend_key.as_bytes();
             let shared_view = state3.xmr_shared_view_secret();
             let refund_address = std::env::var("XKR_ASB_REFUND_ADDRESS")
@@ -780,7 +753,6 @@ where
             state3,
             xmr_refund_txid,
         } => {
-            // The XKR refund sweep already broadcast atomically in the previous step.
             tracing::info!(%swap_id, txid = %xmr_refund_txid, "XKR refund sweep is broadcast");
 
             AliceState::XmrRefundTxPublished {
@@ -792,9 +764,6 @@ where
             state3,
             xmr_refund_txid,
         } => {
-            // The refund sweep is broadcast; Alice has reclaimed her funds. On-chain
-            // confirmation is skipped here because this state does not carry the
-            // shared keys needed to re-import the wallet for a confirm poll.
             tracing::info!(%swap_id, txid = %xmr_refund_txid, "XKR refund sweep broadcast; funds reclaimed");
 
             AliceState::XmrRefunded {
@@ -982,9 +951,6 @@ where
     })
 }
 
-/// A placeholder Monero tx key for the XKR `TransferProof`. XKR locks are detected
-/// by Bob via view-key scanning, so the `tx_key` field is unused; we keep the
-/// `TransferProof` shape (and the p2p message) unchanged and fill a fixed valid key.
 fn placeholder_tx_key() -> monero_oxide_ext::PrivateKey {
     let mut bytes = [0u8; 32];
     bytes[0] = 1;

@@ -8,10 +8,6 @@ use std::time::{Duration, Instant};
 /// Represents the rate at which we are willing to trade 1 XMR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rate {
-    /// The asking price in satoshis per 1 XMR/XKR. A `Decimal` (not
-    /// `bitcoin::Amount`) so it can represent SUB-SATOSHI prices -- 1 XKR is
-    /// often worth a fraction of a satoshi, so an integer sats price can't
-    /// express the real rate.
     ask: Decimal,
     /// The spread which should be applied to the market asking price.
     ask_spread: Decimal,
@@ -25,12 +21,10 @@ impl Rate {
         ask_spread: ZERO_SPREAD,
     };
 
-    /// `ask` is satoshis per 1 XMR/XKR (may be fractional).
     pub fn new(ask: Decimal, ask_spread: Decimal) -> Self {
         Self { ask, ask_spread }
     }
 
-    /// Computes the asking price (sats per 1 XMR/XKR) with the spread applied.
     pub fn ask(&self) -> Result<Decimal> {
         Ok(self.ask + self.ask * self.ask_spread)
     }
@@ -40,7 +34,6 @@ impl Rate {
         Self::quote(self.ask()?, quote)
     }
 
-    /// `rate` is satoshis per 1 XMR/XKR (may be fractional).
     fn quote(rate: Decimal, quote: bitcoin::Amount) -> Result<monero_oxide_ext::Amount> {
         // quote (btc) = rate * base (xmr)
         // base = quote / rate
@@ -87,7 +80,6 @@ impl FixedRate {
 
 impl Default for FixedRate {
     fn default() -> Self {
-        // RATE is in BTC (per XMR); convert to satoshis for the Decimal ask.
         let ask = Decimal::from(
             bitcoin::Amount::from_btc(Self::RATE)
                 .expect("Static value should never fail")
@@ -120,10 +112,6 @@ pub struct ExchangeRate {
     kucoin_price_updates: Option<crate::kucoin::PriceUpdates>,
     exolix_price_updates: Option<crate::exolix::PriceUpdates>,
     validity_duration: Duration,
-    /// When set, `latest_rate` returns this ask directly and ignores the feeds.
-    /// Used for XKR, which no exchange lists a BTC pair for -- the maker sets a
-    /// manual sats-per-XKR price instead. A `Decimal` so sub-satoshi prices work
-    /// (1 XKR is often worth a fraction of a sat).
     fixed_ask: Option<Decimal>,
 }
 
@@ -158,9 +146,6 @@ impl ExchangeRate {
         })
     }
 
-    /// A maker rate with a manually set ask (satoshis per XKR, may be fractional)
-    /// and no exchange feeds. This is the XKR path: there is no BTC/XKR market to
-    /// feed from.
     pub fn fixed(ask: Decimal, ask_spread: Decimal) -> Self {
         Self {
             ask_spread,
@@ -208,7 +193,6 @@ impl crate::traits::LatestRate for ExchangeRate {
     type Error = Error;
 
     fn latest_rate(&mut self) -> Result<Rate, Self::Error> {
-        // XKR: no exchange feed exists, so use the manually configured ask.
         if let Some(ask) = self.fixed_ask {
             return Ok(Rate::new(ask, self.ask_spread));
         }
@@ -235,8 +219,6 @@ impl crate::traits::LatestRate for ExchangeRate {
             exolix_update,
             self.validity_duration,
         )
-        // Feed prices come back as whole-sat `bitcoin::Amount`; the Rate ask is a
-        // Decimal (sats) so it can also carry a manual sub-sat XKR price.
         .map(|average_ask| Rate::new(Decimal::from(average_ask.to_sat()), self.ask_spread))
     }
 }

@@ -127,8 +127,6 @@ impl AsbApiServer for RpcImpl {
         })
     }
 
-    // XKR port: the ASB has no Monero wallet. These endpoints are retained for
-    // API compatibility but no longer report Monero data.
     async fn monero_balance(&self) -> Result<MoneroBalanceResponse, ErrorObjectOwned> {
         Ok(MoneroBalanceResponse { balance: 0 })
     }
@@ -236,7 +234,6 @@ impl AsbApiServer for RpcImpl {
                 start_date,
                 state: current_alice.to_string(),
                 btc_lock_txid: state3.tx_lock.txid().to_string(),
-                // XKR lock txid (once locked), from the current state's transfer proof.
                 xmr_lock_txid: current_alice.transfer_proof().map(|p| p.tx_hash().to_string()),
                 btc_amount: state3.btc,
                 xmr_amount: state3.xmr.as_pico(),

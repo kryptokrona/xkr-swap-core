@@ -15,10 +15,6 @@ use crate::monero::MoneroAddressPool;
 use monero_interface::PublishTransaction;
 
 pub(super) trait XmrRedeemable {
-    /// Sweep the shared 2-of-2 XKR output to `xkr_receive_address`, returning the
-    /// broadcast tx hash. The XKR analogue of constructing+publishing the Monero
-    /// redeem: the wallet `sweep` builds, signs and broadcasts atomically, so there
-    /// is no separate publish step and no persisted transaction object.
     async fn sweep_xmr_redeem(
         self,
         xkr: &XkrWallet,
@@ -44,14 +40,11 @@ impl XmrRedeemable for State5 {
         xkr_receive_address: &str,
     ) -> Result<String> {
         let (spend_key, view_key) = self.xmr_keys();
-        // Canonical little-endian scalar bytes == the XKR private spend/view keys.
         let spend_secret = spend_key.as_bytes();
         let view_secret = view_key.0.as_bytes();
 
         tracing::info!(%swap_id, dest = %xkr_receive_address, "Sweeping shared XKR output to receive address");
 
-        // Idempotent in the service: a re-sweep after a crashed-but-broadcast attempt
-        // returns the existing tx hash instead of double-spending.
         let txid = xkr
             .redeem(spend_secret, view_secret, xkr_receive_address, None)
             .await
@@ -99,8 +92,6 @@ pub(super) trait WaitForIncomingXmrLockTransaction {
 impl WaitForIncomingXmrLockTransaction for State3 {
     async fn wait_for_incoming_xmr_lock_transaction(&self, _swap_id: Uuid) -> monero::TxHash {
         let (public_spend_key, private_view_key) = self.xmr_view_keys();
-        // Shared 2-of-2 output keys: watch the shared XKR address with the shared
-        // view secret until Alice's lock lands, then record its tx hash.
         let spend_public = public_spend_key.as_bytes();
         let view_public = private_view_key.public().0.as_bytes();
         let view_secret = private_view_key.0.as_bytes();
@@ -131,7 +122,6 @@ impl WaitForIncomingXmrLockTransaction for State3 {
     }
 }
 
-/// Outcome of validating an XKR lock transaction candidate.
 #[derive(Clone, Copy)]
 pub(super) enum XmrLockTransactionValidity {
     Invalid,
@@ -159,10 +149,6 @@ impl VerifyXmrLockTransaction for State3 {
         let xkr = XkrWallet::from_env();
         let address = xkr.shared_address(spend_public, view_public).await?;
 
-        // The lock is valid once the shared address has received at least the
-        // agreed amount. Hermes funding is dropped in the XKR port (single-dest),
-        // so there is never a hermes amount. A short watch returns immediately if
-        // the deposit is already present; otherwise it waits briefly for it.
         xkr.watch_for_lock(&address, view_secret, amount, Some(60_000))
             .await
             .context("Failed to observe the XKR lock at the shared address")?;
@@ -209,9 +195,6 @@ where
     }
 }
 
-/// Observe the shared XKR lock at its address (view-only). NOTE: the XKR port
-/// treats "observed at the shared address with the agreed amount" as confirmed;
-/// it does not wait for a Monero-style deep-reorg confirmation window.
 async fn watch_shared_lock(
     spend_public: [u8; 32],
     view_public: [u8; 32],

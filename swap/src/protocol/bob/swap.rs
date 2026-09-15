@@ -134,8 +134,6 @@ async fn next_state(
     db: Arc<dyn Database + Send + Sync>,
     bitcoin_wallet: Arc<dyn BitcoinWallet>,
     monero_receive_pool: MoneroAddressPool,
-    // Bob's XKR receive address — the sweep destination for the redeem. Supplied
-    // per-run by the caller (not persisted in state), mirroring the receive pool.
     xkr_receive_address: String,
     event_emitter: Option<TauriHandle>,
     env_config: env::Config,
@@ -152,8 +150,6 @@ async fn next_state(
             change_address,
             tx_lock_fee,
         } => {
-            // XKR port: no Monero daemon connectivity check; the XKR wallet service
-            // is contacted lazily when the swap first needs the XKR chain.
             let tx_cancel_fee = bitcoin_wallet
                 .estimate_fee(TxCancel::weight(), Some(btc_amount))
                 .await?;
@@ -266,8 +262,6 @@ async fn next_state(
                     // If the Monero transaction gets confirmed before Bob comes online again then
                     // Bob would record a wallet-height that is past the lock transaction height,
                     // which can lead to the wallet not detect the transaction.
-                    // XKR port: no Monero restore height. TODO: query the XKR daemon
-                    // height; 0 scans from genesis (correct, slower for a resync).
                     let monero_wallet_restore_blockheight = 0u64;
 
                     BobState::BtcLockReadyToPublish {
@@ -592,7 +586,6 @@ async fn next_state(
                 TauriSwapProgressEvent::InflightEncSig { p2p_sent },
             );
 
-            // Once we have sent the encrypted signature over p2p, we are done.
             if p2p_sent {
                 return Ok(BobState::EncSigSent { state });
             }
@@ -771,8 +764,6 @@ async fn next_state(
             state,
             xmr_redeem_txid,
         } => {
-            // The XKR sweep already broadcast atomically in the previous step; this
-            // state exists only so a crashed swap resumes straight into confirming.
             event_emitter.emit_swap_progress_event(
                 swap_id,
                 TauriSwapProgressEvent::PublishingMoneroRedeem {
@@ -800,8 +791,6 @@ async fn next_state(
                 },
             );
 
-            // Best-effort confirm; the sweep is already broadcast, so Bob has the
-            // funds either way. Keyed by txid, so this is safe to re-run on resume.
             let xkr = XkrWallet::from_env();
             let (spend_key, view_key) = state.xmr_keys();
             if let Err(e) = xkr

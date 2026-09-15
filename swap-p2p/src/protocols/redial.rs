@@ -108,13 +108,6 @@ impl Behaviour {
             address: address.clone(),
         });
 
-        // A caller adds a SPECIFIC address (e.g. our freshly-opened local bridge
-        // for a swap) precisely because it's a new, reachable path -- so try it
-        // NOW. Reset the peer's backoff (it may have grown to the 30s cap from
-        // earlier failed dials to the peer's stale loopback/onion addresses) and
-        // schedule an immediate dial (replace=true overrides any pending backoff).
-        // Without this, an already-tracked peer's swap would wait out that backoff
-        // before the bridge is ever dialed -- long past the GUI's patience.
         self.backoff.reset(&peer);
         self.schedule_redial(&peer, Duration::ZERO, true);
 

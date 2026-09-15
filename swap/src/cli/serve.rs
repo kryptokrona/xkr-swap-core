@@ -1,19 +1,3 @@
-//! JSON-RPC serve daemon for the taker side of the swap engine.
-//!
-//! The wallet GUI (aesir, an Electron app) can't use the Tauri command layer
-//! (`src-tauri`), so it drives the engine over HTTP JSON-RPC instead. This module
-//! wraps an already-built `cli::api::Context` and exposes the taker operations
-//! the GUI needs:
-//!
-//!   * `status`          -- readiness probe.
-//!   * `buy_xmr_direct`  -- start a swap against an explicitly-provided maker
-//!                          (e.g. the local ASB), skipping the interactive
-//!                          maker-selection. Returns the swap id immediately.
-//!   * `swap_infos`      -- all swaps and their current state (poll for progress).
-//!   * `history`         -- completed-swap history.
-//!   * `balance`         -- the taker's Bitcoin balance.
-//!   * `resume`          -- resume a swap by id.
-
 use crate::cli::api::Context;
 use crate::cli::api::request::{
     BalanceArgs, BuyXmrDirectArgs, CancelAndRefundArgs, GetBitcoinAddressArgs,
@@ -31,22 +15,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Map any error into a JSON-RPC error object.
 fn rpc_err(e: impl std::fmt::Display) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>)
 }
 
 #[derive(Deserialize)]
 struct BuyXmrDirectParams {
-    /// The maker's libp2p multiaddress.
     seller_multiaddr: String,
-    /// The maker's libp2p peer id.
     seller_peer_id: String,
-    /// The BTC amount to lock, in satoshis.
     btc_amount_sat: u64,
-    /// The XKR address to receive the swapped funds at.
     xkr_receive_address: String,
-    /// Optional BTC change address (defaults to an internal wallet address).
     #[serde(default)]
     bitcoin_change_address: Option<String>,
 }
@@ -54,10 +32,6 @@ struct BuyXmrDirectParams {
 #[derive(Deserialize)]
 struct ResumeParams {
     swap_id: String,
-    /// Optional fresh dialable address for the maker. Aesir bridges the maker over
-    /// HyperSwarm on an ephemeral local port that dies with the process, so after a
-    /// restart the DB's stored address is dead. Supplying the newly-opened bridge
-    /// address here re-points the peer before resuming, so the swap can reconnect.
     #[serde(default)]
     seller_multiaddr: Option<String>,
 }
@@ -69,38 +43,22 @@ struct CancelParams {
 
 #[derive(Deserialize)]
 struct WithdrawBtcParams {
-    /// Destination Bitcoin address.
     address: String,
-    /// Amount in satoshis. Omit / null to drain the wallet.
     #[serde(default)]
     amount_sat: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct SwapErrorParams {
-    /// The swap to fetch the last recorded failure reason for.
     swap_id: String,
 }
 
 #[derive(Deserialize)]
 struct EstimateLockFeeParams {
-    /// The BTC amount (satoshis) the taker intends to lock.
     btc_amount_sat: u64,
 }
 
-/// Serve the taker JSON-RPC API on `host:port` from an already-built `Context`
-/// (its p2p event loop is already running). Blocks until the server stops.
-/// Keep the Bitcoin wallet balance fresh in the background so the frequently
-/// polled `balance` RPC can return the persisted value instantly instead of
-/// forcing a full electrum sync (which piled up and timed out the client).
-/// Syncs once immediately, then every `SYNC_INTERVAL`. The wallet already
-/// persists its state to disk, so a restart serves the last-known balance until
-/// the first background sync lands.
 fn spawn_background_bitcoin_sync(context: Arc<Context>) {
-    // Kept short so incoming (received) BTC txs surface in the GUI quickly --
-    // otherwise a deposit can take up to a full interval to appear, which makes
-    // swapping feel unsafe. Sent txs already appear immediately (the wallet knows
-    // them on broadcast); this interval only bounds how fast we notice deposits.
     const SYNC_INTERVAL: Duration = Duration::from_secs(10);
     tokio::spawn(async move {
         loop {
@@ -134,9 +92,6 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         serde_json::to_value(r).map_err(rpc_err)
     })?;
 
-    // Estimate the on-chain fee for the BTC lock transaction of a given amount,
-    // so the GUI can show it BEFORE the user confirms the swap (the same figure
-    // buy_xmr_direct computes internally). Returns { fee_sat }.
     module.register_async_method("estimate_lock_fee", |params, ctx, _ext| async move {
         let ctx: Arc<Context> = (*ctx).clone();
         let p: EstimateLockFeeParams = params.parse().map_err(rpc_err)?;
@@ -149,15 +104,10 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         serde_json::to_value(serde_json::json!({ "fee_sat": fee.to_sat() })).map_err(rpc_err)
     })?;
 
-    // The last recorded failure reason for a swap, if any. A swap that fails
-    // during setup never reaches swap_infos (it has no SwapSetupCompleted state),
-    // so the GUI polls this by swap_id to learn WHY a just-started swap died.
     module.register_async_method("swap_error", |params, ctx, _ext| async move {
         let ctx: Arc<Context> = (*ctx).clone();
         let p: SwapErrorParams = params.parse().map_err(rpc_err)?;
         let swap_id = Uuid::from_str(&p.swap_id).map_err(rpc_err)?;
-        // (message, terminal): terminal=false means "still trying" (transient),
-        // terminal=true means the swap gave up.
         let (error, terminal) = match ctx.get_swap_error(&swap_id) {
             Some((msg, terminal)) => (Some(msg), terminal),
             None => (None, false),
@@ -176,9 +126,6 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
 
     module.register_async_method("balance", |_params, ctx, _ext| async move {
         let ctx: Arc<Context> = (*ctx).clone();
-        // Return the persisted balance WITHOUT forcing an electrum sync. The UI
-        // polls this frequently; a per-call full sync piled up and blew past the
-        // client timeout. `spawn_background_bitcoin_sync` keeps the value fresh.
         let r = BalanceArgs { force_refresh: false }
             .request(ctx)
             .await
@@ -224,8 +171,6 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         let ctx: Arc<Context> = (*ctx).clone();
         let p: ResumeParams = params.parse().map_err(rpc_err)?;
         let swap_id = Uuid::from_str(&p.swap_id).map_err(rpc_err)?;
-        // Re-point the maker at the caller-provided (freshly bridged) address before
-        // resuming; without this, resume keeps dialing the dead stored port.
         if let Some(addr) = p.seller_multiaddr.as_deref() {
             let multiaddr = Multiaddr::from_str(addr).map_err(rpc_err)?;
             let db = ctx.try_get_db().await.map_err(rpc_err)?;
@@ -247,20 +192,12 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         serde_json::to_value(r).map_err(rpc_err)
     })?;
 
-    // Suspend the currently-running swap, releasing the engine's global swap lock.
-    // A single stuck/wedged swap otherwise holds that lock and blocks every new
-    // swap (acquire_swap_lock bails). The swap stays in the DB (completed=false)
-    // and can be resumed or cancel-refunded afterwards; nothing on-chain changes.
     module.register_async_method("suspend_current_swap", |_params, ctx, _ext| async move {
         let ctx: Arc<Context> = (*ctx).clone();
         let r = SuspendCurrentSwapArgs.request(ctx).await.map_err(rpc_err)?;
         serde_json::to_value(r).map_err(rpc_err)
     })?;
 
-    // Cancel + refund a swap by id: publishes the cancel tx (once the cancel
-    // timelock allows) and then the refund, returning the taker's locked BTC.
-    // Needs the swap lock, so if the target swap is currently running the caller
-    // must `suspend_current_swap` first (otherwise acquire_swap_lock bails).
     module.register_async_method("cancel_and_refund", |params, ctx, _ext| async move {
         let ctx: Arc<Context> = (*ctx).clone();
         let p: CancelParams = params.parse().map_err(rpc_err)?;

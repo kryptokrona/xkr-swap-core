@@ -72,8 +72,6 @@ pub struct Swap {
     pub start_date: String,
     pub state: String,
     pub btc_lock_txid: String,
-    /// XKR (Monero) lock transaction hash, once the maker has locked XKR. None
-    /// before the lock. Links to the XKR block explorer in the GUI.
     #[serde(default)]
     pub xmr_lock_txid: Option<String>,
     #[serde(with = "bitcoin::amount::serde::as_sat")]
@@ -149,8 +147,6 @@ pub struct ExternalBitcoinRedeemAddressResponse {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct QuoteResponse {
-    /// Price offered per 1 XMR/XKR, in satoshis. A `Decimal` (serialized as a
-    /// JSON number) so it can carry sub-satoshi prices.
     #[serde(with = "rust_decimal::serde::float")]
     pub price: rust_decimal::Decimal,
     /// Minimum BTC amount the maker is willing to swap, in satoshis.

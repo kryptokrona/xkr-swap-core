@@ -83,9 +83,6 @@ pub async fn refund(
         bail!(Error::RefundTransactionNotPublishedYet(bob_peer_id),);
     };
 
-    // `spend_key` is the combined shared spend key (s_a + s_b extracted from Bob's
-    // BTC refund). With the shared view secret, sweep the shared XKR output back to
-    // the ASB's refund address — the same operation as the in-flow XKR refund.
     let _ = transfer_proof; // txid no longer needed: the wallet finds the output by scanning
     let shared_spend = spend_key.as_bytes();
     let shared_view = state3.xmr_shared_view_secret();

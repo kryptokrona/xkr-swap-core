@@ -497,8 +497,6 @@ pub fn query_user_for_initial_config(testnet: bool) -> Result<Config> {
     query_user_for_initial_config_with_network(bitcoin_network, monero_network)
 }
 
-/// Parse rendezvous multiaddrs from the `XKR_SWAP_RENDEZVOUS` env var (comma
-/// separated, each with a `/p2p/<peer-id>` part). Unset/empty => none.
 fn rendezvous_points_from_env() -> Vec<Multiaddr> {
     match std::env::var("XKR_SWAP_RENDEZVOUS") {
         Ok(s) if !s.trim().is_empty() => s
@@ -509,13 +507,6 @@ fn rendezvous_points_from_env() -> Vec<Multiaddr> {
     }
 }
 
-/// Build a default ASB config non-interactively. The wallet GUI uses this to
-/// generate a `config.toml` headlessly (see `swap-asb generate-config`).
-/// `data_dir` and `electrum_rpc_urls` override the network defaults when given.
-///
-/// NOTE: the resulting maker still needs a FUNDED XKR wallet (keys via the
-/// `XKR_ASB_SPEND_SECRET` / `XKR_ASB_VIEW_SECRET` env vars) before it can lock
-/// XKR and complete swaps -- that funding is out of scope for config generation.
 pub fn default_config(
     testnet: bool,
     data_dir: Option<PathBuf>,
@@ -539,8 +530,6 @@ pub fn default_config(
         },
         network: Network {
             listen: vec![defaults.listen_address_tcp],
-            // Register at the XKR rendezvous point(s) so takers can discover this
-            // maker. Sourced from `XKR_SWAP_RENDEZVOUS` (same var the taker uses).
             rendezvous_point: rendezvous_points_from_env(),
             external_addresses: vec![],
             prometheus_port: None,

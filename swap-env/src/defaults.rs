@@ -44,11 +44,6 @@ pub const BITFINEX_PRICE_TICKER_WS_URL: &str = "wss://api-pub.bitfinex.com/ws/2"
 pub const KUCOIN_PRICE_TICKER_REST_URL: &str = "https://api.kucoin.com/api/v1/bullet-public";
 pub const EXOLIX_PRICE_TICKER_REST_URL: &str = "https://exolix.com/api/v2/rate";
 
-/// XKR rendezvous points. Sourced from the `XKR_SWAP_RENDEZVOUS` env var (comma
-/// separated multiaddrs, each with a `/p2p/<peer-id>` part); empty otherwise.
-/// The taker/ASB usually take their rendezvous from config/env directly; the
-/// `rendezvous-node` uses this to mesh with sibling XKR rendezvous nodes.
-/// (Previously hard-coded to the Monero/eigenwallet rendezvous network.)
 pub fn default_rendezvous_points() -> Vec<Multiaddr> {
     match std::env::var("XKR_SWAP_RENDEZVOUS") {
         Ok(s) if !s.trim().is_empty() => s

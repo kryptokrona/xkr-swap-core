@@ -134,7 +134,6 @@ impl AmountExt for Amount {
             return Some(bitcoin::Amount::ZERO);
         }
 
-        // ask_price is already satoshis per XMR/XKR (Decimal, possibly sub-sat).
         let ask_sats = ask_price;
         let pico_per_xmr = Decimal::from(PICONERO_OFFSET);
         let ask_sats_per_pico = ask_sats / pico_per_xmr;

@@ -35,7 +35,6 @@ pub enum AliceState {
     },
     XmrLockTransactionConstructed {
         monero_wallet_restore_blockheight: BlockHeight,
-        /// The hash of the broadcast XKR lock transaction.
         xmr_lock_txid: String,
         transfer_proof: TransferProof,
         state3: Box<State3>,
@@ -97,14 +96,12 @@ pub enum AliceState {
     /// not yet published it.
     XmrRefundTxConstructed {
         state3: Box<State3>,
-        /// The hash of the broadcast XKR refund transaction.
         xmr_refund_txid: String,
     },
     /// We have published the Monero refund transaction but it has not yet
     /// been included in a block.
     XmrRefundTxPublished {
         state3: Box<State3>,
-        /// The hash of the broadcast XKR refund transaction.
         xmr_refund_txid: String,
     },
     /// We have published the Monero refund transaction and it has been
@@ -152,9 +149,6 @@ pub enum AliceState {
 }
 
 impl AliceState {
-    /// The XKR (Monero) lock transfer proof, present once the maker has locked
-    /// XKR (i.e. from XmrLockTransactionConstructed onward). Used to surface the
-    /// XKR lock txid in the maker's swap list.
     pub fn transfer_proof(&self) -> Option<&TransferProof> {
         match self {
             AliceState::XmrLockTransactionConstructed { transfer_proof, .. }
@@ -857,8 +851,6 @@ impl State3 {
         }
     }
 
-    /// The shared view secret bytes (`v`) for reconstructing the shared XKR wallet
-    /// (e.g. to sweep the shared output during an XKR refund).
     pub fn xmr_shared_view_secret(&self) -> [u8; 32] {
         self.v.0.as_bytes()
     }

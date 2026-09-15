@@ -57,8 +57,6 @@ impl AsRef<str> for BidQuoteProtocol {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[typeshare]
 pub struct BidQuote {
-    /// The price at which the maker is willing to buy at, in satoshis per XKR.
-    /// A `Decimal` (not `bitcoin::Amount`) so it can carry SUB-SATOSHI prices.
     #[typeshare(serialized_as = "string")]
     pub price: Decimal,
     /// The minimum quantity the maker is willing to buy.

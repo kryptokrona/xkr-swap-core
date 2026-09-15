@@ -244,13 +244,6 @@ mod context {
         pub(super) bitcoin_wallet: Arc<RwLock<Option<Arc<bitcoin_wallet::Wallet>>>>,
         pub(super) tor_client: Arc<RwLock<Option<Arc<TorClient<TokioRustlsRuntime>>>>>,
         pub(super) event_loop_state: Arc<RwLock<Option<EventLoopState>>>,
-        /// Current failure/retry reason per swap_id, for swaps that error
-        /// asynchronously (e.g. a setup that fails or keeps retrying before
-        /// reaching SwapSetupCompleted, and so never appears in swap_infos).
-        /// Value is (message, terminal): terminal=false means "still trying"
-        /// (transient, keep waiting); terminal=true means the swap gave up.
-        /// Surfaced to the GUI via the `swap_error` RPC. A std Mutex (not tokio)
-        /// so the event loop's synchronous retry-notify callback can record too.
         pub(super) swap_errors: Arc<Mutex<HashMap<Uuid, (String, bool)>>>,
     }
 
@@ -278,28 +271,22 @@ mod context {
             }
         }
 
-        /// A shared handle to the swap-error store, for components outside the
-        /// Context (e.g. the event loop's retry callback) to record into.
         pub(super) fn swap_error_store(&self) -> Arc<Mutex<HashMap<Uuid, (String, bool)>>> {
             self.swap_errors.clone()
         }
 
-        /// Record why a swap failed (terminal=true) or is still retrying
-        /// (terminal=false), so the GUI can fetch it by swap_id.
         pub fn record_swap_error(&self, swap_id: Uuid, error: String, terminal: bool) {
             if let Ok(mut map) = self.swap_errors.lock() {
                 map.insert(swap_id, (error, terminal));
             }
         }
 
-        /// Clear a swap's recorded error (e.g. once setup succeeds).
         pub fn clear_swap_error(&self, swap_id: &Uuid) {
             if let Ok(mut map) = self.swap_errors.lock() {
                 map.remove(swap_id);
             }
         }
 
-        /// The current (message, terminal) for a swap, if any.
         pub fn get_swap_error(&self, swap_id: &Uuid) -> Option<(String, bool)> {
             self.swap_errors.lock().ok().and_then(|map| map.get(swap_id).cloned())
         }
@@ -307,7 +294,6 @@ mod context {
         pub async fn status(&self) -> ContextStatus {
             ContextStatus {
                 bitcoin_wallet_available: self.try_get_bitcoin_wallet().await.is_ok(),
-                // XKR port: no Monero wallet in the engine.
                 monero_wallet_available: false,
                 database_available: self.try_get_db().await.is_ok(),
                 tor_available: self.try_get_tor_client().await.is_ok(),
@@ -322,7 +308,6 @@ mod context {
                 .clone()
                 .context("Bitcoin wallet not initialized")
         }
-
 
         /// Get the database, returning an error if not initialized
         pub async fn try_get_db(&self) -> Result<Arc<dyn Database + Send + Sync>> {
@@ -528,9 +513,6 @@ mod builder {
                 );
             });
 
-            // Initialize the Tor client. The XKR build has no Monero RPC pool or
-            // Monero wallet database — the taker's XKR side is the external XKR
-            // wallet service.
             let unbootstrapped_tor_client = if self.tor {
                 match create_tor_client(&base_data_dir).await.inspect_err(|err| {
                     tracing::warn!(%err, "Failed to create Tor client. We will continue without Tor");
@@ -543,8 +525,6 @@ mod builder {
                 None
             };
 
-            // Bootstrap the Tor client in the background; awaited later so the
-            // context waits for Tor to finish bootstrapping.
             let bootstrap_tor_client_task = AbortOnDropHandle::new(tokio::spawn({
                 let unbootstrapped_tor_client = unbootstrapped_tor_client.clone();
                 let tauri_handle = self.tauri_handle.clone();
@@ -563,12 +543,6 @@ mod builder {
 
             *context.tor_client.write().await = unbootstrapped_tor_client.clone();
 
-            // XKR port: the whole engine wallet (Bitcoin funds + libp2p identity)
-            // derives from one seed. When `XKR_SWAP_SEED_KEY` (64-char hex of the
-            // XKR wallet's private spend key) is set, the seed is derived from it
-            // deterministically, so restoring the XKR wallet restores this wallet
-            // too. Otherwise fall back to a local seed file. XKR funds themselves
-            // live in the external XKR wallet service; `monero_manager` stays None.
             let seed = match std::env::var("XKR_SWAP_SEED_KEY").ok().filter(|s| !s.is_empty()) {
                 Some(hex_key) => {
                     let bytes = hex::decode(hex_key.trim())
@@ -584,7 +558,6 @@ mod builder {
                     .context("Failed to read or generate the engine seed")?,
             };
 
-            // Identity = the seed-derived libp2p peer id (stable per taker).
             let identity = seed
                 .derive_libp2p_identity()
                 .public()

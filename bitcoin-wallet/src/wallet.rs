@@ -92,14 +92,11 @@ pub const DUST_AMOUNT: Amount = Amount::from_sat(546);
 /// It unifies all the functionality we need when interacting
 /// with the bitcoin network.
 ///
-/// A wallet transaction summary for a history view.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BitcoinTx {
     pub txid: String,
-    /// Net effect on this wallet in satoshis: positive = received, negative = sent.
     pub amount_sat: i64,
     pub confirmed: bool,
-    /// Unix confirmation time (seconds), when confirmed.
     pub timestamp: Option<u64>,
     pub height: Option<u32>,
 }
@@ -373,13 +370,7 @@ impl<T> std::ops::Deref for CachedFeeEstimator<T> {
 impl Wallet {
     /// If this many consequent addresses are unused, we stop the full scan.
     /// On old wallets we used to generate a ton of unused addresses
-    /// which results in us having a bunch of large gaps in the SPKs.
-    /// XKR-port engine wallets are always freshly derived from a seed (no
-    /// imported history), so a large gap just makes the initial scan take
-    /// minutes and blocks the daemon from serving; 100 is ample here.
     const SCAN_STOP_GAP: u32 = 100;
-    /// The batch size for syncing. Larger batches mean fewer (slow) electrum
-    /// round-trips during the initial full scan.
     const SCAN_BATCH_SIZE: u32 = 100;
     /// The number of maximum chunks to use when syncing
     const SCAN_CHUNKS: u32 = 5;
@@ -1355,7 +1346,6 @@ where
         Ok(self.wallet.lock().await.balance())
     }
 
-    /// List the wallet's transactions, most recent first (for a history view).
     pub async fn list_transactions(&self) -> Result<Vec<BitcoinTx>> {
         let wallet = self.wallet.lock().await;
         let mut out: Vec<BitcoinTx> = wallet
@@ -1380,8 +1370,6 @@ where
                 }
             })
             .collect();
-        // Most recent first. Unconfirmed txs (no timestamp yet) just happened, so
-        // float them to the top rather than burying them at the bottom.
         out.sort_by(|a, b| match (a.timestamp, b.timestamp) {
             (None, None) => std::cmp::Ordering::Equal,
             (None, Some(_)) => std::cmp::Ordering::Less, // a is unconfirmed -> first

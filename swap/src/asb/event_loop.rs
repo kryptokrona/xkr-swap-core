@@ -728,10 +728,6 @@ where
                 Ok(alice_states)
             };
 
-            // Bound quotes by the maker's real unlocked XKR balance (queried from
-            // the wallet service), so the advertised max_buy reflects what the ASB
-            // can actually lock rather than a fake infinite balance. Fails closed:
-            // on error the quote computation errors and no capacity is advertised.
             let get_unlocked_balance = || async {
                 let xkr = crate::xkr::XkrWallet::from_env();
                 let (spend, view) = crate::xkr::XkrWallet::asb_keys_from_env()?;
@@ -743,7 +739,6 @@ where
                 ))
             };
 
-            // Quote zero unless the Bitcoin backend is reachable.
             let health_check = async {
                 bitcoin_health_check_with_retry(bitcoin_wallet)
                     .await
@@ -1362,11 +1357,6 @@ async fn capture_wallet_snapshot(
         .await
         .context("Bitcoin wallet health check failed while capturing wallet snapshot")?;
 
-    // Report the maker's real unlocked XKR balance so the swap-setup balance check
-    // ("unlocked balance too low to fulfill swapping") rejects an under-funded swap
-    // BEFORE the taker locks any BTC -- instead of accepting it and then failing to
-    // lock XKR, which strands the taker until the 600s early-refund. Fails closed:
-    // if the balance can't be read, setup is rejected rather than risked.
     let unlocked_balance = {
         let xkr = crate::xkr::XkrWallet::from_env();
         let (spend, view) = crate::xkr::XkrWallet::asb_keys_from_env()

@@ -1,0 +1,19 @@
+[package]
+name = "xkr-wallet"
+version = "0.1.0"
+edition = "2024"
+description = "XKR (Kryptokrona) wallet client for BTC<->XKR atomic swaps. Talks JSON-RPC to the wallet-backend-js-backed service that lives inside the wallet app."
+
+[lib]
+name = "xkr_wallet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xkr-wallet"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

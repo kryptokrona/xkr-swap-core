@@ -6,42 +6,37 @@ Defines the Continuous Integration workflow for merging into the `master` branch
 
 ## Releases
 
-The workflows in this repository automate various things around releases.
-The functionality is composed in such a way that a human can easily start the workflow at various points, i.e. instead of being an all-or-nothing automation, we can step in where necessary.
-
-### Preview release
-
-We have a rolling tag `preview` that always points to HEAD of `master`.
-The [preview-release.yml](./preview-release.yml) workflow moves this tag to latest HEAD once per day at noon UTC.
-It also creates a corresponding GitHub "pre-release".
-
-### Building release binaries and attaching changelog
-
-Whenever a new release is created, the [build-release-binaries.yml](build-release-binaries.yml) workflow will build the `swap` and `asb` binaries in release mode and attach them to the release as artifacts.
-
-Because this workflow is triggered on every release, it works for:
-
-- automatically created `preview` releases
-- releases created through the GitHub web interface
-- releases created by merging release branches into `master`
+Releases are driven entirely by **pushing a git tag**. There is no separate
+"create a release" workflow to run first — [build-release-binaries.yml](build-release-binaries.yml)
+does everything on the tag push.
 
 ### Making a new release
 
-To create a new release, one has to:
+1. Bump the version in the crate manifests (`swap/Cargo.toml`, `swap-asb/Cargo.toml`, …)
+   and move the `Unreleased` section of the Changelog to the new version.
+2. Commit and push to `master`.
+3. Tag the commit and push the tag:
 
-- Create a new branch
-- Update the version in the [swap/Cargo.toml](../../swap/Cargo.toml) manifest file
-- Update the Changelog (convert `Unreleased` section to a release)
-- Make a commit
-- Open and merge a PR
-- Create a release from the resulting merge commit
+   ```sh
+   git tag v1.2.3
+   git push origin v1.2.3
+   ```
 
-To avoid errors in this process, we can automate it.
-The [draft-new-release.yml](./draft-new-release.yml) workflow allows the user specify the desired version and the workflow will then open a PR that automates the above.
+That tag push triggers [build-release-binaries.yml](build-release-binaries.yml), which:
 
-The created branch will follow the naming of `release/X.Y.Z` for the given version.
+- **Creates the GitHub release** for the tag (idempotently — if one already exists
+  for the tag, it reuses it).
+- **Marks it as a pre-release** when the tag name contains a pre-release identifier
+  (`alpha`, `beta`, `rc`, `pre`, `preview`, `dev`, `snapshot`, `nightly`, `test`),
+  e.g. `v1.2.3-beta.1` or `test-<sha>`. Otherwise it is a full release.
+- **Builds** `swap`, `asb`, `asb-controller`, `rendezvous-node` and `orchestrator`
+  in release mode for Linux x64, macOS arm64, macOS x64 and Windows x64.
+- **GPG-signs** each archive and attaches the archive + `.asc` signature to the release.
+- **Builds and pushes the Docker images** (`asb`, `asb-controller`) to ghcr, except
+  for `test-*` tags. Pre-releases are published **without** the moving `:latest` tag.
 
-Any time a PR with such a branch name is merged, the [create-release.yml](./create-release.yml) workflow kicks in and creates a new release based on the resulting merge commit.
+To release from an arbitrary commit (e.g. a test build), just tag that commit —
+prefix the tag with `test-` to get a pre-release that skips the Docker publish.
 
-Because these two workflows are de-coupled, a user is free to create a release branch themselves if they wish to do so.
-They may also side-step both of these workflows by creating a release manually using the Github web interface.
+You can also still create a release manually through the GitHub web interface; the
+build workflow keys off the tag, so attaching binaries works the same way.

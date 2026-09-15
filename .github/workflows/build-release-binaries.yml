@@ -2,20 +2,78 @@ name: "Build swap, asb, asb-controller, orchestrator and rendezvous-node release
 
 on:
   pull_request:
-  release:
-    types: [created]
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
 
 env:
   DOCKER_ASB_IMAGE_NAME: ghcr.io/eigenwallet/asb
   DOCKER_ASB_CONTROLLER_IMAGE_NAME: ghcr.io/eigenwallet/asb-controller
 
 concurrency:
-  group: build-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event.release.tag_name }}
+  group: build-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
+  # On a tag push, create the GitHub release the matrix uploads its binaries to.
+  # A single job (rather than per-matrix creation) avoids the 20 build jobs
+  # racing to create the same release. Tags containing a pre-release identifier
+  # (alpha/beta/rc/pre/dev/...) mark the release as a pre-release.
+  create_release:
+    name: Create GitHub release from tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      tag_name: ${{ github.ref_name }}
+      prerelease: ${{ steps.prerelease.outputs.value }}
+    steps:
+      - name: Determine pre-release from tag name
+        id: prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          # Delimited match so a version like v1.2.3-beta.1 or test-<sha> is a
+          # pre-release, but "arch" etc. is not mistaken for "rc".
+          if echo "$tag" | grep -qiE '(^|[-._])(alpha|beta|rc|pre|preview|dev|snapshot|nightly|test)([-._]|$)'; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+            echo "Tag '$tag' -> pre-release"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            echo "Tag '$tag' -> full release"
+          fi
+
+      # Idempotent: a sibling workflow (create-release / preview / dev-test) may
+      # have already created this release via the BOTTY PAT, whose tag push is
+      # what triggered us. View-or-create so we never fail on an existing release,
+      # and reconcile its pre-release flag with what the tag implies.
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.BOTTY_GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          PRE="${{ steps.prerelease.outputs.value }}"  # true | false
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; ensuring prerelease=$PRE"
+            gh release edit "$TAG" --prerelease=$PRE --draft=false
+          else
+            gh release create "$TAG" --title "$TAG" --prerelease=$PRE \
+              --notes "Automated release for $TAG"
+          fi
+
   build_binaries:
     name: Build
+    # Depend on create_release so the matrix can upload to it, but still run on
+    # pull_request / workflow_dispatch (where create_release is skipped): run
+    # unless a dependency actually failed.
+    needs: [create_release]
+    if: ${{ !failure() && !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +141,16 @@ jobs:
           BIN_DIR="target/${{ matrix.target.target }}/release"
           echo "BIN_PATH=$BIN_DIR/${{ matrix.bin.name }}${{ matrix.target.ext }}" >> "$GITHUB_ENV"
 
+      # Upload the raw binary so any run (dispatch / PR / release) is downloadable
+      # via `gh run download` -- release runs additionally attach the archive as a
+      # release asset below.
+      - name: Upload binary as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin.name }}-${{ matrix.target.target }}
+          path: ${{ env.BIN_PATH }}
+          if-no-files-found: error
+
       - name: Smoke test the binary
         if: ${{ matrix.target.do_smoke_test }}
         shell: bash
@@ -115,7 +183,7 @@ jobs:
 
           system = os_mapping[target_os]
 
-          archive_name=f'${{ matrix.bin.name }}_${{ github.event.release.tag_name || format('pull_request_{0}', github.event.pull_request.number) }}_{system}_{arch}.${{ matrix.target.archive_extension }}'
+          archive_name=f'${{ matrix.bin.name }}_${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('pull_request_{0}', github.event.pull_request.number) }}_{system}_{arch}.${{ matrix.target.archive_extension }}'
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output_file:
               output_file.write(f'archive={archive_name}\n')
 
@@ -132,20 +200,20 @@ jobs:
           zip ${{ steps.create-archive-name.outputs.archive }} -j ${{ env.BIN_PATH }}
 
       - name: Install GnuPG (macOS)
-        if: github.event_name == 'release' && runner.os == 'macOS'
+        if: startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS'
         shell: bash
         run: |
           brew install gnupg
 
       - name: Install GnuPG (Linux)
-        if: github.event_name == 'release' && runner.os == 'Linux'
+        if: startsWith(github.ref, 'refs/tags/') && runner.os == 'Linux'
         shell: bash
         run: |
           sudo apt-get update -y
           sudo apt-get install -y gnupg
 
       - name: Import GPG private key
-        if: github.event_name == 'release'
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         shell: bash
@@ -179,7 +247,7 @@ jobs:
           echo "GPG_FPR=$FPR" >> "$GITHUB_ENV"
 
       - name: Sign archive with GPG
-        if: github.event_name == 'release'
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         shell: bash
@@ -190,34 +258,26 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
                 -u "$GPG_FPR" --armor --output "${ARCHIVE}.asc" --detach-sign "$ARCHIVE"
 
-      - name: Upload archive
-        if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1.0.2
+      - name: Upload archive + signature to the release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
-          GITHUB_TOKEN: ${{ secrets.BOTTY_GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./${{ steps.create-archive-name.outputs.archive }}
-          asset_name: ${{ steps.create-archive-name.outputs.archive }}
-          asset_content_type: application/gzip
-
-      - name: Upload archive signature (.asc)
-        if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.BOTTY_GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./${{ steps.create-archive-name.outputs.archive }}.asc
-          asset_name: ${{ steps.create-archive-name.outputs.archive }}.asc
-          asset_content_type: application/pgp-signature
+          GH_TOKEN: ${{ secrets.BOTTY_GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          ARCHIVE="${{ steps.create-archive-name.outputs.archive }}"
+          # --clobber so re-runs replace assets rather than 422 on duplicates.
+          # Each matrix job uploads its own distinct archive to the shared release.
+          gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.asc" --clobber
 
   build_and_push_docker:
     name: Build and Push Docker Image
     # Skip Docker publishing for developer testing releases (tag prefix `test-`).
-    if: github.event_name == 'release' && !startsWith(github.event.release.tag_name, 'test-')
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name, 'test-')
     runs-on: ubuntu-22.04
-    needs: build_binaries
+    needs: [create_release, build_binaries]
     permissions:
       contents: read
       packages: write
@@ -239,10 +299,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A pre-release (alpha/beta/rc/preview/...) is published WITHOUT the moving
+      # `:latest` tag, so pulling `:latest` never lands on a pre-release image.
       - name: Set Docker tags
         id: docker_tags
         run: |
-          if [[ ${{ github.event.release.tag_name }} == "preview" ]]; then
+          if [[ "${{ needs.create_release.outputs.prerelease }}" == "true" ]]; then
             echo "preview=true" >> $GITHUB_OUTPUT
           else
             echo "preview=false" >> $GITHUB_OUTPUT
@@ -255,7 +317,7 @@ jobs:
           file: ./swap-asb/Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKER_ASB_IMAGE_NAME }}:${{ github.event.release.tag_name }}
+            ${{ env.DOCKER_ASB_IMAGE_NAME }}:${{ github.ref_name }}
             ${{ env.DOCKER_ASB_IMAGE_NAME }}:latest
             ${{ env.DOCKER_ASB_IMAGE_NAME }}:${{ github.sha }}
         if: steps.docker_tags.outputs.preview == 'false'
@@ -267,7 +329,7 @@ jobs:
           file: ./swap-asb/Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKER_ASB_IMAGE_NAME }}:${{ github.event.release.tag_name }}
+            ${{ env.DOCKER_ASB_IMAGE_NAME }}:${{ github.ref_name }}
             ${{ env.DOCKER_ASB_IMAGE_NAME }}:${{ github.sha }}
         if: steps.docker_tags.outputs.preview == 'true'
 
@@ -278,7 +340,7 @@ jobs:
           file: ./swap-controller/Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKER_ASB_CONTROLLER_IMAGE_NAME }}:${{ github.event.release.tag_name }}
+            ${{ env.DOCKER_ASB_CONTROLLER_IMAGE_NAME }}:${{ github.ref_name }}
             ${{ env.DOCKER_ASB_CONTROLLER_IMAGE_NAME }}:latest
             ${{ env.DOCKER_ASB_CONTROLLER_IMAGE_NAME }}:${{ github.sha }}
         if: steps.docker_tags.outputs.preview == 'false'
@@ -290,6 +352,6 @@ jobs:
           file: ./swap-controller/Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKER_ASB_CONTROLLER_IMAGE_NAME }}:${{ github.event.release.tag_name }}
+            ${{ env.DOCKER_ASB_CONTROLLER_IMAGE_NAME }}:${{ github.ref_name }}
             ${{ env.DOCKER_ASB_CONTROLLER_IMAGE_NAME }}:${{ github.sha }}
         if: steps.docker_tags.outputs.preview == 'true'

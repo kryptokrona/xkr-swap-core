@@ -103,20 +103,19 @@ impl Behaviour {
     pub fn add_peer_with_address(&mut self, peer: PeerId, address: Multiaddr) -> bool {
         let newly_added = self.peers.insert(peer);
 
-        // If the peer is newly added, schedule a dial immediately
-        if newly_added {
-            self.schedule_redial(&peer, Duration::ZERO, false);
-
-            tracing::trace!(
-                ?address,
-                "Started tracking peer and added a specific address"
-            );
-        }
-
         self.to_swarm.push_back(ToSwarm::NewExternalAddrOfPeer {
             peer_id: peer,
             address: address.clone(),
         });
+
+        self.backoff.reset(&peer);
+        self.schedule_redial(&peer, Duration::ZERO, true);
+
+        tracing::trace!(
+            ?address,
+            newly_added,
+            "Added a specific address; reset backoff and scheduled an immediate dial"
+        );
 
         newly_added
     }

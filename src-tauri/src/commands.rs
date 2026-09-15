@@ -183,10 +183,8 @@ pub async fn initialize_context(
             bitcoin_electrum_rpc_urls: settings.electrum_rpc_urls.clone(),
             bitcoin_target_block: None,
         })
-        .with_monero(settings.monero_node_config)
         .with_json(false)
         .with_tor(settings.use_tor)
-        .with_enable_monero_tor(settings.enable_monero_tor)
         .with_rendezvous_points(rendezvous_points)
         .with_tauri(tauri_handle.clone())
         .build(state.context())

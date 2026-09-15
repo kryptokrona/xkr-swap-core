@@ -73,6 +73,14 @@ where
             .map_err(|e| Error::IOError(std::io::Error::other(e.to_string())))?
     }
 
+    fn invalidate_client(&self, idx: usize) {
+        if let Ok(mut clients) = self.clients.write()
+            && idx < clients.len()
+        {
+            clients[idx] = Arc::new(OnceCell::new());
+        }
+    }
+
     /// Create a new balancer from a list of Electrum URLs with default configuration.
     pub async fn new_with_factory(
         urls: Vec<String>,
@@ -261,6 +269,7 @@ where
                         "Electrum operation failed, switching to next client"
                     );
 
+                    self.invalidate_client(idx);
                     errors.push(err);
                 }
             }

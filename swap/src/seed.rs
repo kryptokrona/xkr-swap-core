@@ -31,18 +31,6 @@ impl Seed {
         Ok(Seed(bytes))
     }
 
-    /// Extract seed from a Monero wallet
-    pub async fn from_monero_wallet(wallet: &crate::monero::Wallet) -> Result<Self, Error> {
-        let mnemonic = wallet.seed().await.context("Failed to get wallet seed")?;
-
-        let monero_seed =
-            MoneroSeed::from_string(Language::English, Zeroizing::new(mnemonic.clone())).map_err(
-                |e| anyhow::anyhow!("Failed to parse seed from wallet (Error: {:?})", e),
-            )?;
-
-        Ok(Seed(*monero_seed.entropy()))
-    }
-
     pub fn derive_libp2p_identity(&self) -> identity::Keypair {
         let bytes = self.derive(b"NETWORK").derive(b"LIBP2P_IDENTITY").bytes();
 
@@ -54,6 +42,18 @@ impl Seed {
         let monero_seed = MoneroSeed::from_string(Language::English, Zeroizing::new(mnemonic))
             .with_context(|| "Failed to parse mnemonic")?;
         Ok(Seed(*monero_seed.entropy()))
+    }
+
+    pub fn from_xkr_spend_key(spend_key: [u8; 32]) -> Self {
+        let mut engine = sha256::HashEngine::default();
+        engine.input(b"XKR_SWAP_ENGINE_SEED");
+        engine.input(&spend_key);
+        let hash = sha256::Hash::from_engine(engine);
+        Seed(hash.to_byte_array())
+    }
+
+    pub fn wallet_id(&self) -> String {
+        hex::encode(&self.derive(b"WALLET_DB_ID").bytes()[..8])
     }
 
     pub async fn from_file_or_generate(data_dir: &Path) -> Result<Self> {
@@ -73,7 +73,6 @@ impl Seed {
     }
 
     /// Derive a new seed using the given scope.
-    ///
     /// This function is purposely kept private because it is only a helper
     /// function for deriving specific secret material from the root seed
     /// like the libp2p identity or the seed for the Bitcoin wallet.
@@ -144,7 +143,6 @@ impl bitcoin_wallet::BitcoinWalletSeed for Seed {
     }
 
     /// Same as `derive_extended_private_key`, but using the legacy BDK API.
-    ///
     /// This is only used for the migration path from the old wallet format to the new one.
     fn derive_extended_private_key_legacy(
         &self,

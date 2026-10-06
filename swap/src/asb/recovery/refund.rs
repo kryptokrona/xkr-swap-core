@@ -86,9 +86,9 @@ pub async fn refund(
     let _ = transfer_proof; // txid no longer needed: the wallet finds the output by scanning
     let shared_spend = spend_key.as_bytes();
     let shared_view = state3.xmr_shared_view_secret();
-    let refund_address = std::env::var("XKR_ASB_REFUND_ADDRESS")
-        .context("XKR_ASB_REFUND_ADDRESS not set")?;
     let xkr = crate::xkr::XkrWallet::from_env();
+    // Explicit XKR_ASB_REFUND_ADDRESS if set, otherwise derived from the ASB keys.
+    let refund_address = xkr.resolve_asb_refund_address().await?;
 
     retry(
         "Refund XKR",

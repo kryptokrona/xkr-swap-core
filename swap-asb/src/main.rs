@@ -340,58 +340,6 @@ pub async fn main() -> Result<()> {
                 None => config.maker.external_bitcoin_redeem_address,
             };
 
-            // Ensure the XKR refund address is available before we resume or accept swaps.
-            // The maker-side refund (AliceState::XmrRefundable) and the recovery `refund`
-            // command both read `XKR_ASB_REFUND_ADDRESS` straight from the environment; if it
-            // is unset, a swap that has already locked XKR can never sweep the refund back and
-            // the funds sit stranded in the shared lock output. Honor an explicit override,
-            // otherwise auto-derive the maker's own XKR address from the ASB keys (the same
-            // keys used to lock XKR), so refunds always have somewhere to go.
-            match std::env::var("XKR_ASB_REFUND_ADDRESS")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-            {
-                Some(addr) => {
-                    tracing::info!(
-                        address = %addr.trim(),
-                        "Refunding maker XKR to the configured XKR_ASB_REFUND_ADDRESS"
-                    );
-                }
-                None => {
-                    let (spend_secret, view_secret) =
-                        swap::xkr::XkrWallet::asb_keys_from_env().context(
-                            "XKR_ASB_REFUND_ADDRESS is not set and the ASB keys needed to \
-                             auto-derive it are unavailable",
-                        )?;
-                    let spend_public = swap::monero::PublicKey::from_private_key(
-                        &swap::monero::PrivateKey::from_slice(&spend_secret)
-                            .context("ASB spend secret is not a valid key")?,
-                    )
-                    .as_bytes();
-                    let view_public = swap::monero::PublicKey::from_private_key(
-                        &swap::monero::PrivateKey::from_slice(&view_secret)
-                            .context("ASB view secret is not a valid key")?,
-                    )
-                    .as_bytes();
-                    let refund_address = swap::xkr::XkrWallet::from_env()
-                        .shared_address(spend_public, view_public)
-                        .await
-                        .context(
-                            "Failed to auto-derive the maker's XKR refund address from the ASB keys",
-                        )?;
-                    tracing::info!(
-                        address = %refund_address,
-                        "XKR_ASB_REFUND_ADDRESS not set; auto-derived the maker's own XKR address \
-                         for refunds (set XKR_ASB_REFUND_ADDRESS to override)"
-                    );
-                    // Safe: startup is still single-threaded here, and this runs before the
-                    // event loop below resumes swaps (which is where the address is read).
-                    unsafe {
-                        std::env::set_var("XKR_ASB_REFUND_ADDRESS", &refund_address);
-                    }
-                }
-            }
-
             let (event_loop, mut swap_receiver, event_loop_service) = EventLoop::new(
                 swarm,
                 metrics,

@@ -61,6 +61,39 @@ impl XkrWallet {
         Ok((spend, view))
     }
 
+    /// Resolve the maker's XKR refund address for the ASB.
+    ///
+    /// Honors an explicit `XKR_ASB_REFUND_ADDRESS` override; otherwise derives the
+    /// maker's own XKR address from the ASB keys (the same keys used to lock XKR), so a
+    /// post-lock refund always has somewhere to go even when the env var is unset. Kept
+    /// here (where the value is consumed) rather than set via `std::env::set_var`, which
+    /// is `unsafe` in edition 2024 and forbidden in the `swap-asb` crate.
+    pub async fn resolve_asb_refund_address(&self) -> Result<String> {
+        if let Ok(addr) = std::env::var("XKR_ASB_REFUND_ADDRESS") {
+            let addr = addr.trim();
+            if !addr.is_empty() {
+                return Ok(addr.to_string());
+            }
+        }
+
+        let (spend_secret, view_secret) = Self::asb_keys_from_env().context(
+            "XKR_ASB_REFUND_ADDRESS is not set and the ASB keys needed to derive it are unavailable",
+        )?;
+        let spend_public = crate::monero::PublicKey::from_private_key(
+            &crate::monero::PrivateKey::from_slice(&spend_secret)
+                .context("ASB spend secret is not a valid key")?,
+        )
+        .as_bytes();
+        let view_public = crate::monero::PublicKey::from_private_key(
+            &crate::monero::PrivateKey::from_slice(&view_secret)
+                .context("ASB view secret is not a valid key")?,
+        )
+        .as_bytes();
+        self.shared_address(spend_public, view_public)
+            .await
+            .context("Failed to derive the maker's XKR refund address from the ASB keys")
+    }
+
     pub async fn unlocked_balance(
         &self,
         spend_secret: [u8; 32],

@@ -59,7 +59,8 @@ async fn main() -> Result<()> {
             let view_secret = args.rest.get(1).ok_or_else(|| anyhow!("viewSecret required"))?;
             let dest = args.rest.get(2).ok_or_else(|| anyhow!("dest required"))?;
             let fee = args.rest.get(3).and_then(|s| s.parse().ok());
-            println!("{}", client.sweep(spend_secret, view_secret, dest, fee).await?);
+            let scan_height = args.rest.get(4).and_then(|s| s.parse().ok());
+            println!("{}", client.sweep(spend_secret, view_secret, dest, fee, scan_height).await?);
         }
         Some("serve") | None => serve(&client, &args.rpc_url).await,
         Some(other) => return Err(anyhow!("unknown command: {other}")),

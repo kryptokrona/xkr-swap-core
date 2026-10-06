@@ -101,9 +101,16 @@ impl XkrWallet {
         view_secret: [u8; 32],
         dest: &str,
         fee: Option<u64>,
+        scan_height: Option<u64>,
     ) -> Result<String> {
         self.client
-            .sweep(&Self::hex(spend_secret), &Self::hex(view_secret), dest, fee)
+            .sweep(
+                &Self::hex(spend_secret),
+                &Self::hex(view_secret),
+                dest,
+                fee,
+                scan_height,
+            )
             .await
     }
 

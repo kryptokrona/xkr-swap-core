@@ -96,7 +96,9 @@ pub async fn refund(
             let xkr = xkr.clone();
             let refund_address = refund_address.clone();
             async move {
-                xkr.redeem(shared_spend, shared_view, &refund_address, None)
+                // No per-swap height threaded here; the manual recovery path relies on the
+                // wallet-rpc's XKR_WALLET_SCAN_HEIGHT floor (or the `sweep` CLI's scan-height arg).
+                xkr.redeem(shared_spend, shared_view, &refund_address, None, None)
                     .await
                     .map(|_txid| ())
                     .map_err(backoff::Error::transient)

@@ -93,11 +93,18 @@ impl XkrWalletClient {
         view_secret: &str,
         dest: &str,
         fee: Option<u64>,
+        scan_height: Option<u64>,
     ) -> Result<String> {
         let mut params =
             json!({ "spendSecret": spend_secret, "viewSecret": view_secret, "destAddress": dest });
         if let Some(fee) = fee {
             params["fee"] = json!(fee);
+        }
+        // Tell the wallet-rpc where to start scanning for the shared output. Without
+        // this it falls back to a global floor (tip-based) that sits *above* an old
+        // swap's lock height, so the sweep never finds the balance and times out.
+        if let Some(scan_height) = scan_height {
+            params["scanHeight"] = json!(scan_height);
         }
         let result = self.call("sweep", params).await?;
         result

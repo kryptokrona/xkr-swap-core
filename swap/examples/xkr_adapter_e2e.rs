@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     step(4, "redeem() (sweep shared output)");
     let sweep_txid = xkr
-        .redeem(combined_spend, combined_view, &funder_addr, Some(fee))
+        .redeem(combined_spend, combined_view, &funder_addr, Some(fee), None)
         .await
         .context("redeem failed")?;
     println!("[engine-e2e]   OK redeem txid = {sweep_txid}");

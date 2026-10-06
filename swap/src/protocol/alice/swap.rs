@@ -716,7 +716,7 @@ where
             state3,
         },
         AliceState::XmrRefundable {
-            monero_wallet_restore_blockheight: _,
+            monero_wallet_restore_blockheight,
             transfer_proof: _,
             spend_key,
             state3,
@@ -725,6 +725,10 @@ where
             let shared_view = state3.xmr_shared_view_secret();
             let refund_address = std::env::var("XKR_ASB_REFUND_ADDRESS")
                 .context("XKR_ASB_REFUND_ADDRESS not set")?;
+            // Scan from the height where the XKR was locked. Without this the sweep
+            // falls back to the wallet-rpc's global floor (tip-based), which is above
+            // an old swap's lock height, so it never sees the output and times out.
+            let scan_height = Some(monero_wallet_restore_blockheight.height);
             let xkr = XkrWallet::from_env();
 
             let xmr_refund_txid = retry(
@@ -733,7 +737,7 @@ where
                     let xkr = xkr.clone();
                     let refund_address = refund_address.clone();
                     async move {
-                        xkr.redeem(shared_spend, shared_view, &refund_address, None)
+                        xkr.redeem(shared_spend, shared_view, &refund_address, None, scan_height)
                             .await
                             .map_err(backoff::Error::transient)
                     }

@@ -39,6 +39,10 @@ impl XmrRedeemable for State5 {
         swap_id: Uuid,
         xkr_receive_address: &str,
     ) -> Result<String> {
+        // Scan from the XKR lock height so the sweep finds the shared output quickly,
+        // instead of relying on the wallet-rpc's global (tip-based) scan floor — which
+        // misses the output entirely for a resumed/old swap and times out.
+        let scan_height = Some(self.monero_wallet_restore_blockheight.height);
         let (spend_key, view_key) = self.xmr_keys();
         let spend_secret = spend_key.as_bytes();
         let view_secret = view_key.0.as_bytes();
@@ -46,7 +50,7 @@ impl XmrRedeemable for State5 {
         tracing::info!(%swap_id, dest = %xkr_receive_address, "Sweeping shared XKR output to receive address");
 
         let txid = xkr
-            .redeem(spend_secret, view_secret, xkr_receive_address, None)
+            .redeem(spend_secret, view_secret, xkr_receive_address, None, scan_height)
             .await
             .context("Failed to sweep shared XKR redeem output")?;
 

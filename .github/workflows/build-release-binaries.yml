@@ -3,6 +3,8 @@ name: "Build swap, asb, asb-controller, orchestrator and rendezvous-node release
 on:
   pull_request:
   push:
+    branches:
+      - "master" # Build head of master so we always have working binaries/artifacts
     tags:
       - '*'
   workflow_dispatch:

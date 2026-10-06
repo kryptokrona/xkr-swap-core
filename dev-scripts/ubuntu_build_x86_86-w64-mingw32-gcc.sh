@@ -100,6 +100,40 @@ download_if_missing() {
     fi
 }
 
+# GNU source mirrors, tried in order. GitHub's Azure CI runners frequently cannot
+# reach ftp.gnu.org or its ftpmirror redirect at all (every connection times out),
+# so try kernel.org first -- it mirrors the complete GNU tree, including the .sig
+# files, and is reliably reachable from the runners. The gnu.org hosts stay as
+# fallbacks for environments where kernel.org is blocked instead.
+GNU_MIRRORS=(
+    "https://mirrors.kernel.org/gnu"
+    "https://ftpmirror.gnu.org/gnu"
+    "https://ftp.gnu.org/gnu"
+)
+
+# download_gnu <path-under-/gnu> [dest]
+# e.g. download_gnu "binutils/binutils-2.42.tar.xz"
+download_gnu() {
+    local rel="$1"
+    local dest="${2:-$(basename "$rel")}"
+    if [ -f "$dest" ]; then
+        echo "Already present: $dest"
+        return 0
+    fi
+    local base
+    for base in "${GNU_MIRRORS[@]}"; do
+        echo "Downloading: $base/$rel"
+        # -t 3 per mirror so a dead one is abandoned quickly and we move to the next.
+        if wget -4 --retry-connrefused --timeout=30 -t 3 -nv "$base/$rel" -O "$dest"; then
+            return 0
+        fi
+        echo "Mirror failed, trying next: $base" >&2
+        rm -f "$dest"
+    done
+    echo "ERROR: all GNU mirrors failed for $rel" >&2
+    return 1
+}
+
 fetch_gpg_key() {
     # Usage: fetch_gpg_key <keyid_or_fingerprint>
     local key="$1"
@@ -179,8 +213,8 @@ ensure_key_and_verify() {
 
 download_sources() {
     # Binutils
-    download_if_missing "https://ftpmirror.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz"
-    download_if_missing "https://ftpmirror.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz.sig"
+    download_gnu "binutils/binutils-${BINUTILS_VER}.tar.xz"
+    download_gnu "binutils/binutils-${BINUTILS_VER}.tar.xz.sig"
     ensure_key_and_verify "binutils-${BINUTILS_VER}.tar.xz" "binutils-${BINUTILS_VER}.tar.xz.sig"
     tar xf "binutils-${BINUTILS_VER}.tar.xz"
 
@@ -191,8 +225,8 @@ download_sources() {
     tar xf "mingw-w64-${MINGW_VER}.tar.bz2"
 
     # GCC
-    download_if_missing "https://ftpmirror.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"
-    download_if_missing "https://ftpmirror.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz.sig"
+    download_gnu "gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"
+    download_gnu "gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz.sig"
     ensure_key_and_verify "gcc-${GCC_VER}.tar.xz" "gcc-${GCC_VER}.tar.xz.sig"
     tar xf "gcc-${GCC_VER}.tar.xz"
 }

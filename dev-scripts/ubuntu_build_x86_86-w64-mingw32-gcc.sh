@@ -93,7 +93,10 @@ download_if_missing() {
         echo "Already present: $dest"
     else
         echo "Downloading: $url"
-        wget --retry-connrefused -t 20 -nv "$url" -O "$dest"
+        # -4: GitHub runners can't reach gnu.org over IPv6 ("Network is unreachable"),
+        # so force IPv4. --timeout so a dead mirror fails fast and the retries kick in
+        # instead of hanging on a stalled connection.
+        wget -4 --retry-connrefused --timeout=30 -t 20 -nv "$url" -O "$dest"
     fi
 }
 
@@ -176,8 +179,8 @@ ensure_key_and_verify() {
 
 download_sources() {
     # Binutils
-    download_if_missing "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz"
-    download_if_missing "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz.sig"
+    download_if_missing "https://ftpmirror.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz"
+    download_if_missing "https://ftpmirror.gnu.org/gnu/binutils/binutils-${BINUTILS_VER}.tar.xz.sig"
     ensure_key_and_verify "binutils-${BINUTILS_VER}.tar.xz" "binutils-${BINUTILS_VER}.tar.xz.sig"
     tar xf "binutils-${BINUTILS_VER}.tar.xz"
 
@@ -188,8 +191,8 @@ download_sources() {
     tar xf "mingw-w64-${MINGW_VER}.tar.bz2"
 
     # GCC
-    download_if_missing "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"
-    download_if_missing "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz.sig"
+    download_if_missing "https://ftpmirror.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"
+    download_if_missing "https://ftpmirror.gnu.org/gnu/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz.sig"
     ensure_key_and_verify "gcc-${GCC_VER}.tar.xz" "gcc-${GCC_VER}.tar.xz.sig"
     tar xf "gcc-${GCC_VER}.tar.xz"
 }

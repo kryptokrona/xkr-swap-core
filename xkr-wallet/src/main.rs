@@ -60,7 +60,10 @@ async fn main() -> Result<()> {
             let dest = args.rest.get(2).ok_or_else(|| anyhow!("dest required"))?;
             let fee = args.rest.get(3).and_then(|s| s.parse().ok());
             let scan_height = args.rest.get(4).and_then(|s| s.parse().ok());
-            println!("{}", client.sweep(spend_secret, view_secret, dest, fee, scan_height).await?);
+            // Optional 6th arg: lock txid, so the wallet-rpc can resolve the exact lock
+            // height from the daemon when no scan height is given.
+            let lock_txid = args.rest.get(5).map(|s| s.as_str());
+            println!("{}", client.sweep(spend_secret, view_secret, dest, fee, scan_height, lock_txid).await?);
         }
         Some("serve") | None => serve(&client, &args.rpc_url).await,
         Some(other) => return Err(anyhow!("unknown command: {other}")),

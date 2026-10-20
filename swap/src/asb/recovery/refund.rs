@@ -83,7 +83,9 @@ pub async fn refund(
         bail!(Error::RefundTransactionNotPublishedYet(bob_peer_id),);
     };
 
-    let _ = transfer_proof; // txid no longer needed: the wallet finds the output by scanning
+    // Lock txid lets the wallet-rpc recover the exact lock height from the daemon so
+    // the sweep self-heals even without an XKR_WALLET_SCAN_HEIGHT override.
+    let lock_txid = transfer_proof.tx_hash().0;
     let shared_spend = spend_key.as_bytes();
     let shared_view = state3.xmr_shared_view_secret();
     let xkr = crate::xkr::XkrWallet::from_env();
@@ -95,10 +97,11 @@ pub async fn refund(
         || {
             let xkr = xkr.clone();
             let refund_address = refund_address.clone();
+            let lock_txid = lock_txid.clone();
             async move {
-                // No per-swap height threaded here; the manual recovery path relies on the
-                // wallet-rpc's XKR_WALLET_SCAN_HEIGHT floor (or the `sweep` CLI's scan-height arg).
-                xkr.redeem(shared_spend, shared_view, &refund_address, None, None)
+                // No per-swap scan height is threaded here, but the lock txid lets the
+                // wallet-rpc look up the exact lock height from the daemon on its own.
+                xkr.redeem(shared_spend, shared_view, &refund_address, None, None, Some(lock_txid.as_str()))
                     .await
                     .map(|_txid| ())
                     .map_err(backoff::Error::transient)

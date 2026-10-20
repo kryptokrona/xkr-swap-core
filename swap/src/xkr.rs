@@ -135,6 +135,7 @@ impl XkrWallet {
         dest: &str,
         fee: Option<u64>,
         scan_height: Option<u64>,
+        lock_txid: Option<&str>,
     ) -> Result<String> {
         self.client
             .sweep(
@@ -143,6 +144,7 @@ impl XkrWallet {
                 dest,
                 fee,
                 scan_height,
+                lock_txid,
             )
             .await
     }

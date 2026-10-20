@@ -94,6 +94,7 @@ impl XkrWalletClient {
         dest: &str,
         fee: Option<u64>,
         scan_height: Option<u64>,
+        lock_txid: Option<&str>,
     ) -> Result<String> {
         let mut params =
             json!({ "spendSecret": spend_secret, "viewSecret": view_secret, "destAddress": dest });
@@ -105,6 +106,12 @@ impl XkrWalletClient {
         // swap's lock height, so the sweep never finds the balance and times out.
         if let Some(scan_height) = scan_height {
             params["scanHeight"] = json!(scan_height);
+        }
+        // Lock txid lets the wallet-rpc look up the exact lock height from the daemon
+        // when no scan height is known (e.g. resuming an old swap persisted with height 0),
+        // so the sweep self-heals without any manual XKR_WALLET_SCAN_HEIGHT override.
+        if let Some(lock_txid) = lock_txid {
+            params["lockTxid"] = json!(lock_txid);
         }
         let result = self.call("sweep", params).await?;
         result

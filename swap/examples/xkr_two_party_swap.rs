@@ -250,8 +250,14 @@ async fn main() -> Result<()> {
     bob_swarm.add_peer_address(alice_peer_id, alice_addr.clone());
 
     let (bob_event_loop, mut bob_handle) =
-        cli::EventLoop::new(bob_swarm, bob_db.clone(), None, tor_priority_tracker)
-            .context("build bob event loop")?;
+        cli::EventLoop::new(
+            bob_swarm,
+            bob_db.clone(),
+            None,
+            tor_priority_tracker,
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+        .context("build bob event loop")?;
     tokio::spawn(bob_event_loop.run());
 
     let swap_id = Uuid::new_v4();

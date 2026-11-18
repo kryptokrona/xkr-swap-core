@@ -33,8 +33,6 @@ fn rendezvous_points_from_env() -> Vec<(PeerId, Vec<Multiaddr>)> {
         .collect()
 }
 
-// See: https://1209k.com/bitcoin-eye/ele.php?chain=btc
-const DEFAULT_ELECTRUM_RPC_URL: &str = "ssl://blockstream.info:700";
 // See: https://1209k.com/bitcoin-eye/ele.php?chain=tbtc
 pub const DEFAULT_ELECTRUM_RPC_URL_TESTNET: &str = "tcp://electrum.blockstream.info:60001";
 
@@ -386,10 +384,17 @@ impl Bitcoin {
     pub fn apply_defaults(self, testnet: bool) -> Result<(Vec<String>, u16)> {
         let bitcoin_electrum_rpc_urls = if !self.bitcoin_electrum_rpc_urls.is_empty() {
             self.bitcoin_electrum_rpc_urls
-        } else if testnet {
-            vec![DEFAULT_ELECTRUM_RPC_URL_TESTNET.to_string()]
         } else {
-            vec![DEFAULT_ELECTRUM_RPC_URL.to_string()]
+            // No URL supplied: hand the balancer the whole default pool so it can
+            // pick a live server and fail over, instead of one hardcoded endpoint.
+            let pool = if testnet {
+                swap_env::defaults::default_electrum_servers_testnet()
+            } else {
+                swap_env::defaults::default_electrum_servers_mainnet()
+            };
+            pool.iter()
+                .map(|u| u.as_str().trim_end_matches('/').to_string())
+                .collect()
         };
 
         let bitcoin_target_block = if let Some(target_block) = self.bitcoin_target_block {

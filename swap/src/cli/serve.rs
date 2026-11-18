@@ -86,6 +86,22 @@ pub async fn run(context: Arc<Context>, host: String, port: u16) -> Result<()> {
         Ok::<_, ErrorObjectOwned>(serde_json::json!({ "ready": true }))
     })?;
 
+    module.register_async_method("bitcoin_status", |_params, ctx, _ext| async move {
+        let ctx: Arc<Context> = (*ctx).clone();
+        let wallet = ctx.try_get_bitcoin_wallet().await.map_err(rpc_err)?;
+        let reachable = matches!(
+            tokio::time::timeout(Duration::from_secs(8), wallet.health_check()).await,
+            Ok(Ok(()))
+        );
+        serde_json::to_value(serde_json::json!({
+            "reachable": reachable,
+            "height": wallet.block_height(),
+            "network": wallet.network().to_string(),
+            "electrum_urls": wallet.electrum_urls(),
+        }))
+        .map_err(rpc_err)
+    })?;
+
     module.register_async_method("swap_infos", |_params, ctx, _ext| async move {
         let ctx: Arc<Context> = (*ctx).clone();
         let r = GetSwapInfosAllArgs.request(ctx).await.map_err(rpc_err)?;

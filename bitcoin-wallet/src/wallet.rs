@@ -368,6 +368,16 @@ impl<T> std::ops::Deref for CachedFeeEstimator<T> {
 }
 
 impl Wallet {
+    /// Get the height of the latest block the wallet's electrum client knows about.
+    pub fn block_height(&self) -> u32 {
+        self.electrum_client.block_height()
+    }
+
+    /// The Electrum server URLs in use (first is the primary/active one).
+    pub fn electrum_urls(&self) -> Vec<String> {
+        self.electrum_client.electrum_urls()
+    }
+
     /// If this many consequent addresses are unused, we stop the full scan.
     /// On old wallets we used to generate a ton of unused addresses
     const SCAN_STOP_GAP: u32 = 100;
@@ -1683,6 +1693,21 @@ where
 }
 
 impl Client {
+    /// Get the height of the latest block the client knows about.
+    pub fn block_height(&self) -> u32 {
+        u32::from(
+            *self
+                .latest_block_height
+                .lock()
+                .expect("latest_block_height mutex poisoned"),
+        )
+    }
+
+    /// The Electrum server URLs in the pool (first is the primary/active one).
+    pub fn electrum_urls(&self) -> Vec<String> {
+        self.inner.urls().clone()
+    }
+
     /// Create a new client with multiple electrum servers for load balancing.
     pub async fn new(electrum_rpc_urls: &[String], sync_interval: Duration) -> Result<Self> {
         let balancer = ElectrumBalancer::new(electrum_rpc_urls.to_vec()).await?;
